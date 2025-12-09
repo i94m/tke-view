@@ -4,12 +4,12 @@
 
 ## 准备工作
 
-1.修改 `dev2` 代码的配置信息。请参考：[运行测试环境代码](/view/live)
+1.修改 `dev2` 代码的路径。
 
 2.执行初始化脚本。
 
 ```shell
-docker exec -it autotest /run/autotest.sh
+docker exec -it autotest /run/init.sh
 ```
 ::: warning 注意：
 上面的脚本会修改底层文件 `autotest/phpunit/library/BaseBootstrap.php`，切勿提交到SVN!

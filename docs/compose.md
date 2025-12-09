@@ -16,7 +16,7 @@
 ```yaml{2}
 services:
   local:
-    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0
+    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2
     container_name: local
     volumes:
       - sites:/opt/sites
@@ -28,7 +28,7 @@ services:
       - "80:80"
     restart: always
   dev:
-    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0
+    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2
     container_name: dev
     volumes:
       - sites:/opt/sites

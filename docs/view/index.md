@@ -1,9 +1,9 @@
-# 本地环境 <Badge type="tip" text="v4.0.0" />
+# 本地环境 <Badge type="tip" text="php8.2" />
 
 ## 使用说明
 
 ::: tip 提示：
-从 `3.0` 版本开始，项目环境使用了 `apache` + `php-fpm` 的方式，同时每个容器内仅支持运行单个环境的代码，如果需要同时跑多个环境的代码，可以创建不同的容器！
+当前环境使用了 `apache` + `php-fpm` 的方式，同时每个容器内仅支持运行单个环境的代码，如果需要同时跑多个环境的代码，可以创建不同的容器！
 :::
 
 容器中的目录说明：
@@ -18,7 +18,7 @@
 
 运行local代码
 ```shell
-docker run -d --name local --restart always -v D:/tke/local:/opt/tk -v D:/tke/sites:/opt/sites -p 80:80 registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0
+docker run -d --name local --restart always -v D:/tke/local:/opt/tk -v D:/tke/sites:/opt/sites -p 80:80 registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2
 ```
 
 :::warning 提示
@@ -32,7 +32,7 @@ docker run -d --name local --restart always -v D:/tke/local:/opt/tk -v D:/tke/si
 ::: details 运行Dev/Dev2/RC等环境（可选）
 不同环境分配不同的端口号即可
 ```shell
-docker run -d --name dev --restart always -v D:/tke/dev:/opt/tk -v D:/tke/sites:/opt/sites -p 8001:80 registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0
+docker run -d --name dev --restart always -v D:/tke/dev:/opt/tk -v D:/tke/sites:/opt/sites -p 8001:80 registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2
 ```
 
 尝试访问：[http://localhost:8001](http://localhost:8001)
@@ -45,7 +45,7 @@ docker run -d --name dev --restart always -v D:/tke/dev:/opt/tk -v D:/tke/sites:
 ```yaml{28,35}
 services:
   local:
-    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0
+    image: registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2
     container_name: local
     volumes:
       - sites:/opt/sites
