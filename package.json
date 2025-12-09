@@ -1,6 +1,6 @@
 {
   "name": "tke-view",
-  "version": "4.0.0",
+  "version": "php8.2",
   "description": "View local development environment.",
   "main": "index.js",
   "author": "rt.wadewang@rayootech.com",
@@ -11,12 +11,10 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:serve": "vitepress serve docs",
-    "build:ubuntu": "docker build -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:2.0.2 --no-cache view/2.0/ubuntu",
-    "build:alpine": "docker build -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:2.0.2-alpine --no-cache view/2.0/alpine",
-    "build:4.0.0": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.2 --build-arg PHP_EXTENSION_DIR_VERSION=20220829 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0 --push view/debian",
-    "check:4.0.0": "docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0",
-    "build:5.0.0": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.4 --build-arg PHP_EXTENSION_DIR_VERSION=20240924 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:5.0.0 --push view/debian",
-    "build:autotest": "docker build -t rtwadewang/autotest:1.0.3 -t rtwadewang/autotest:latest --no-cache ./autotest"
+    "build:autotest": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=7.4 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:autotest --push autotest",
+    "build:php8.2": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.2 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2 --push view/debian",
+    "build:php8.4": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.4 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.4 --push view/debian",
+    "check:php8.2": "docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2"
   },
   "devDependencies": {
     "echarts": "^5.5.1",

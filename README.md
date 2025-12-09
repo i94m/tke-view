@@ -6,14 +6,14 @@
 
 ```shell
 # 构建多架构镜像（推荐）
-docker buildx build --platform linux/amd64,linux/arm64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0 --push view/debian
+docker buildx build --platform linux/amd64,linux/arm64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2 --push view/debian
 
 # 构建单架构镜像
 # 仅构建 amd64 版本
-docker buildx build --platform linux/amd64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0-amd64 view/debian
+docker buildx build --platform linux/amd64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2-amd64 view/debian
 
 # 仅构建 arm64 版本
-docker buildx build --platform linux/arm64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:4.0.0-arm64 view/debian
+docker buildx build --platform linux/arm64 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2-arm64 view/debian
 ```
 
 ### Autotest
