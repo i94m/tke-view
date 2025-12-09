@@ -7,16 +7,11 @@ WORKDIR /opt/tk
 
 # PHP版本
 ARG PHP_VERSION="8.4"
-# PHP扩展库路径
-ARG PHP_EXTENSION_DIR_VERSION="20240924"
 # 声明构建参数
 ARG TARGETARCH
 
 # 非交互环境，避免 tzdata 等交互
 ENV DEBIAN_FRONTEND=noninteractive
-
-# 复制源文件
-COPY src /tmp/
 
 # 合并所有系统操作到一个RUN指令中
 RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
@@ -88,7 +83,9 @@ COPY src/www.conf /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
 COPY src/xdebug.ini /etc/php/${PHP_VERSION}/mods-available/xdebug.ini
 
 # 根据架构复制对应的 pdflib 文件
-COPY src/php${PHP_VERSION}_pdflib_nts_$TARGETARCH.so /usr/lib/php/${PHP_EXTENSION_DIR_VERSION}/pdflib.so
+COPY src/php${PHP_VERSION}_pdflib_nts_${TARGETARCH}.so /tmp
+RUN PHP_EXTENSION_DIR=$(php -r "echo PHP_EXTENSION_DIR;") && \
+    cp /tmp/php${PHP_VERSION}_pdflib_nts_${TARGETARCH}.so ${PHP_EXTENSION_DIR}/pdflib.so
 COPY src/pdflib.ini /etc/php/${PHP_VERSION}/cli/conf.d/pdflib.ini
 COPY src/pdflib.ini /etc/php/${PHP_VERSION}/fpm/conf.d/pdflib.ini
 
@@ -96,20 +93,11 @@ COPY src/pdflib.ini /etc/php/${PHP_VERSION}/fpm/conf.d/pdflib.ini
 COPY src/httpd.conf /etc/apache2/apache2.conf
 COPY src/sites /etc/apache2/sites-enabled/
 
-# ---------- behat ----------
-COPY src/autotest/behat-3.27.0.phar /usr/bin/behat
-
-# ---------- phpunit ----------
-COPY src/autotest/phpunit-11.5.45.phar /usr/bin/phpunit
-
 # ---------- init ----------
 COPY src/entrypoint.sh /run/entrypoint.sh
 COPY src/init.sh /run/init.sh
-COPY src/autotest/init.sh /run/autotest.sh
-RUN chmod +x /usr/bin/behat && \
-    chmod +x /usr/bin/phpunit && \
-    sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/entrypoint.sh && \
-    chmod +x /run/entrypoint.sh /run/init.sh /run/autotest.sh
+RUN sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/entrypoint.sh && \
+    chmod +x /run/entrypoint.sh /run/init.sh
 
 CMD ["/run/entrypoint.sh"]
 EXPOSE 80
