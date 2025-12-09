@@ -32,7 +32,6 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         php${PHP_VERSION} \
-        php${PHP_VERSION}-ast \
         php${PHP_VERSION}-bcmath \
         php${PHP_VERSION}-bz2 \
         php${PHP_VERSION}-curl \
@@ -45,6 +44,7 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
         php${PHP_VERSION}-mysql \
         php${PHP_VERSION}-redis \
         php${PHP_VERSION}-sqlite3 \
+        php${PHP_VERSION}-xdebug \
         php${PHP_VERSION}-xml \
         php${PHP_VERSION}-xmlrpc \
         php${PHP_VERSION}-soap \
@@ -57,6 +57,7 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
 
 # ---------- php.ini 及相关配置 ----------
 COPY src/php.ini /etc/php/${PHP_VERSION}/cli/php.ini
+COPY src/xdebug.ini /etc/php/${PHP_VERSION}/mods-available/xdebug.ini
 
 # ---------- behat ----------
 COPY src/behat-3.12.0.phar /usr/bin/behat
