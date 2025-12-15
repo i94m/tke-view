@@ -11,7 +11,8 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:serve": "vitepress serve docs",
-    "build:autotest": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=7.4 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:autotest --push autotest",
+    "build:autotest-php7.4": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=7.4 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:autotest-php7.4 --push autotest/php74",
+    "build:autotest-php8.2": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.2 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:autotest-php8.2 --push autotest/php82",
     "build:php8.2": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.2 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2 --push view/debian",
     "build:php8.4": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg PHP_VERSION=8.4 -t registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.4 --push view/debian",
     "check:php8.2": "docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/tke-view/view:php8.2"
