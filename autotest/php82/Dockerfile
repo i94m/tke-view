@@ -41,6 +41,7 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
         php${PHP_VERSION}-imap \
         php${PHP_VERSION}-mbstring \
         php${PHP_VERSION}-mcrypt \
+        php${PHP_VERSION}-mongodb \
         php${PHP_VERSION}-mysql \
         php${PHP_VERSION}-redis \
         php${PHP_VERSION}-sqlite3 \
