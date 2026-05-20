@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DEFAULT_APP_ROOT="${VIEW_APP_ROOT:-/opt/tk}"
+DEFAULT_SITE_ROOT_BASE="${VIEW_SITE_ROOT_BASE:-/opt/sites}"
+DEFAULT_DOCUMENT_ROOT_SUFFIX="/web"
+DEFAULT_PHP_BOOTSTRAP="${VIEW_PHP_BOOTSTRAP:-/usr/local/lib/tke-local/php-cli-bootstrap.php}"
+DEFAULT_RUNTIME_INSPECTOR="${VIEW_RUNTIME_INSPECTOR:-/usr/local/lib/tke-local/inspect-runtime-contract.php}"
+DEFAULT_LARAVEL_ARTISAN_RELATIVE_PATH="vivid/artisan"
+DEFAULT_PHPUNIT_BOOTSTRAP_RELATIVE_PATH="vivid/tests/bootstrap.php"
+DEFAULT_UNIT_TARGET="tests/Unit/Services"
+DEFAULT_TDD_RESULT_PARSER="${VIEW_TDD_RESULT_PARSER:-/usr/local/lib/tke-local/parse-phpunit-junit.php}"
+DEFAULT_TDD_OUTPUT_FORMAT="text"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  local prepare-sites [--site-root-base <path>]
+  local diagnose --site <site> [--format json|text]
+  local run --site <site> -- <command...>
+  local artisan --site <site> -- <artisan-args...>
+  local test --site <site> [--unit <path>] [--filter <name>] [-- <phpunit-args...>]
+  local tdd-run --site <site> --phase <RED|GREEN> --file <path> [--methods <csv>] [--lane <name>] [--json] [-- <phpunit-args...>]
+
+Commands:
+  prepare-sites  Ensure legacy /opt/<site> bridge paths exist for mounted site directories.
+  diagnose    Resolve the runtime contract and verify the effective PHP site bootstrap.
+  run         Execute a command with local runtime environment variables exported.
+  artisan     Execute the repo's Laravel artisan entrypoint with the local runtime bootstrap.
+  test        Execute focused PHPUnit unit tests with the local runtime bootstrap.
+  tdd-run     Execute one focused TDD verification pass and classify the result.
+
+Examples:
+  local prepare-sites --site-root-base /opt/sites
+  local diagnose --site hk --format text
+  local run --site hk -- php sys/bin/some-script.php
+  local artisan --site hk -- list
+  local test --site hk --unit tests/Unit/Services/Nps/SearchScreenServiceTest.php
+  local test --site hk --filter SearchScreenServiceTest --unit tests/Unit/Services/Nps
+  local tdd-run --site hk --phase RED --file tests/Unit/Services/Nps/SearchScreenServiceTest.php --methods testSearch
+EOF
+}
+
+fail() {
+    printf 'Error: %s\n' "$1" >&2
+    exit 1
+}
+
+json_escape() {
+    local value="${1//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "$value"
+}
+
+trim_shell_value() {
+    printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+pcre_escape() {
+    php -r 'echo preg_quote($argv[1], "/");' "$1"
+}
+
+join_command_for_display() {
+    local formatted=()
+    local arg quoted
+
+    for arg in "$@"; do
+        printf -v quoted '%q' "$arg"
+        formatted+=("$quoted")
+    done
+
+    local IFS=' '
+    printf '%s' "${formatted[*]}"
+}
+
+build_exact_methods_filter() {
+    local raw_methods="$1"
+    local pieces=()
+    local item escaped
+
+    IFS=',' read -r -a method_items <<< "$raw_methods"
+    for item in "${method_items[@]}"; do
+        item="$(trim_shell_value "$item")"
+        [[ -n "$item" ]] || continue
+        escaped="$(pcre_escape "$item")"
+        pieces+=("$escaped")
+    done
+
+    [[ ${#pieces[@]} -gt 0 ]] || fail "--methods requires at least one non-empty method name"
+
+    local joined=""
+    local piece
+    for piece in "${pieces[@]}"; do
+        if [[ -n "$joined" ]]; then
+            joined+="|"
+        fi
+        joined+="$piece"
+    done
+
+    printf '(?:^|::)(?:%s)(?: with data set .*)?$' "$joined"
+}
+
+normalize_path() {
+    local raw_path="$1"
+    [[ -n "$raw_path" ]] || fail "path cannot be empty"
+
+    if [[ -d "$raw_path" ]]; then
+        (cd "$raw_path" && pwd)
+        return 0
+    fi
+
+    if [[ -e "$raw_path" ]]; then
+        local dir base
+        dir="$(cd "$(dirname "$raw_path")" && pwd)"
+        base="$(basename "$raw_path")"
+        printf '%s/%s\n' "$dir" "$base"
+        return 0
+    fi
+
+    printf '%s\n' "$raw_path"
+}
+
+site_host_alias_for_site() {
+    local wanted_site="$1"
+    local raw_aliases pair site_name host_label
+
+    raw_aliases="${VIEW_LOCAL_SITE_HOST_ALIASES:-}"
+    [[ -n "$raw_aliases" ]] || return 1
+
+    IFS=',' read -r -a pairs <<< "$raw_aliases"
+    for pair in "${pairs[@]}"; do
+        pair="$(printf '%s' "$pair" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        [[ -n "$pair" && "$pair" == *=* ]] || continue
+
+        site_name="$(printf '%s' "${pair%%=*}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        host_label="$(printf '%s' "${pair#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        if [[ "$site_name" == "$wanted_site" && -n "$host_label" ]]; then
+            printf '%s' "$host_label"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+create_runtime_site_bridge() {
+    local bridge_name="$1"
+    local target_site_dir="$2"
+    local bridge_root bridge_path expected_target current_target
+
+    [[ -n "$bridge_name" ]] || return 0
+
+    bridge_root="$(dirname "$DEFAULT_APP_ROOT")"
+    bridge_path="$bridge_root/$bridge_name"
+    expected_target="$(cd "$target_site_dir" && pwd)"
+
+    if [[ -L "$bridge_path" || ! -e "$bridge_path" ]]; then
+        ln -sfn "$target_site_dir" "$bridge_path"
+        return 0
+    fi
+
+    current_target="$(cd "$bridge_path" && pwd)"
+    [[ "$current_target" == "$expected_target" ]] || fail "site bridge path already exists and does not point to $target_site_dir: $bridge_path"
+}
+
+run_prepare_sites() {
+    local runtime_root_base="$DEFAULT_SITE_ROOT_BASE"
+    local site_dir site_name host_alias
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --site-root-base)
+                [[ $# -ge 2 ]] || fail "--site-root-base requires a value"
+                runtime_root_base="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                fail "unknown option for prepare-sites: $1"
+                ;;
+        esac
+    done
+
+    runtime_root_base="$(normalize_path "$runtime_root_base")"
+    [[ -d "$runtime_root_base" ]] || fail "site root base does not exist: $runtime_root_base"
+
+    while IFS= read -r -d '' site_dir; do
+        [[ -f "$site_dir/config.php" ]] || continue
+        site_name="$(basename "$site_dir")"
+        create_runtime_site_bridge "$site_name" "$site_dir"
+        host_alias="$(site_host_alias_for_site "$site_name" || true)"
+        if [[ -n "$host_alias" && "$host_alias" != "$site_name" ]]; then
+            create_runtime_site_bridge "$host_alias" "$site_dir"
+        fi
+        printf 'prepared_site=%s\n' "$site_name"
+    done < <(find "$runtime_root_base" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+}
+
+init_context_defaults() {
+    SITE=""
+    APP_ROOT="$DEFAULT_APP_ROOT"
+    SITE_ROOT_BASE="$DEFAULT_SITE_ROOT_BASE"
+    OUTPUT_FORMAT="json"
+}
+
+parse_shared_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --site)
+                [[ $# -ge 2 ]] || fail "--site requires a value"
+                SITE="$2"
+                shift 2
+                ;;
+            --app-root|--code-mount-path)
+                [[ $# -ge 2 ]] || fail "$1 requires a value"
+                APP_ROOT="$2"
+                shift 2
+                ;;
+            --site-root-base|--site-mount-path)
+                [[ $# -ge 2 ]] || fail "$1 requires a value"
+                SITE_ROOT_BASE="$2"
+                shift 2
+                ;;
+            --format)
+                [[ $# -ge 2 ]] || fail "--format requires a value"
+                OUTPUT_FORMAT="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    REMAINING_ARGS=("$@")
+}
+
+resolve_context() {
+    [[ -n "$SITE" ]] || fail "missing required --site"
+
+    APP_ROOT="$(normalize_path "$APP_ROOT")"
+    [[ -d "$APP_ROOT" ]] || fail "app_root does not exist: $APP_ROOT"
+
+    SITE_ROOT_BASE="$(normalize_path "$SITE_ROOT_BASE")"
+    [[ -d "$SITE_ROOT_BASE" ]] || fail "site_root_base does not exist: $SITE_ROOT_BASE"
+
+    SITE_ROOT="$SITE_ROOT_BASE/$SITE"
+    [[ -d "$SITE_ROOT" ]] || fail "site_root does not exist for site '$SITE': $SITE_ROOT"
+    [[ -f "$SITE_ROOT/config.php" ]] || fail "site config not found: $SITE_ROOT/config.php"
+
+    DOCUMENT_ROOT="$APP_ROOT$DEFAULT_DOCUMENT_ROOT_SUFFIX"
+    [[ -d "$DOCUMENT_ROOT" ]] || fail "document_root does not exist: $DOCUMENT_ROOT"
+
+    LARAVEL_ARTISAN="$APP_ROOT/$DEFAULT_LARAVEL_ARTISAN_RELATIVE_PATH"
+    [[ -f "$LARAVEL_ARTISAN" ]] || fail "Laravel artisan entrypoint not found: $LARAVEL_ARTISAN"
+
+    PHP_BOOTSTRAP="$DEFAULT_PHP_BOOTSTRAP"
+    [[ -f "$PHP_BOOTSTRAP" ]] || fail "PHP bootstrap file not found: $PHP_BOOTSTRAP"
+
+    RUNTIME_INSPECTOR="$DEFAULT_RUNTIME_INSPECTOR"
+    [[ -f "$RUNTIME_INSPECTOR" ]] || fail "runtime inspector file not found: $RUNTIME_INSPECTOR"
+
+    LEGACY_SITE_PATH="$(dirname "$APP_ROOT")/$SITE"
+    BOOTSTRAP_PROFILE="legacy_laravel_shared"
+    PHPUNIT_BOOTSTRAP_HELPER="$APP_ROOT/$DEFAULT_PHPUNIT_BOOTSTRAP_RELATIVE_PATH"
+
+    [[ -f "$PHPUNIT_BOOTSTRAP_HELPER" ]] || fail "PHPUnit bootstrap helper not found: $PHPUNIT_BOOTSTRAP_HELPER"
+}
+
+ensure_site_bridge() {
+    local expected_target current_target
+
+    expected_target="$(cd "$SITE_ROOT" && pwd)"
+
+    if [[ -L "$LEGACY_SITE_PATH" || ! -e "$LEGACY_SITE_PATH" ]]; then
+        ln -sfn "$SITE_ROOT" "$LEGACY_SITE_PATH"
+        return 0
+    fi
+
+    current_target="$(cd "$LEGACY_SITE_PATH" && pwd)"
+    [[ "$current_target" == "$expected_target" ]] || fail "legacy site bridge path already exists and does not point to $SITE_ROOT: $LEGACY_SITE_PATH"
+}
+
+export_runtime_env() {
+    export VIEW_SITE="$SITE"
+    export VIEW_SITE_ROOT="$SITE_ROOT"
+    export VIEW_APP_ROOT="$APP_ROOT"
+    export DOCUMENT_ROOT="$DOCUMENT_ROOT"
+    export HOME="$APP_ROOT"
+    export REQUEST_SCHEME="http"
+}
+
+run_runtime_inspector() {
+    local line key value
+
+    INSPECT_DOCUMENT_ROOT=""
+    INSPECT_HTTP_HOST=""
+    INSPECT_SERVER_NAME=""
+    INSPECT_REQUEST_SCHEME=""
+    INSPECT_BASE_DIR=""
+    INSPECT_DATABASE_NAME=""
+    INSPECT_GLOBAL_DATABASE_NAME=""
+    INSPECT_COMPANY_LOGO=""
+
+    ensure_site_bridge
+    export_runtime_env
+
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            document_root) INSPECT_DOCUMENT_ROOT="$value" ;;
+            http_host) INSPECT_HTTP_HOST="$value" ;;
+            server_name) INSPECT_SERVER_NAME="$value" ;;
+            request_scheme) INSPECT_REQUEST_SCHEME="$value" ;;
+            base_dir) INSPECT_BASE_DIR="$value" ;;
+            database_name) INSPECT_DATABASE_NAME="$value" ;;
+            global_database_name) INSPECT_GLOBAL_DATABASE_NAME="$value" ;;
+            company_logo) INSPECT_COMPANY_LOGO="$value" ;;
+        esac
+    done < <(php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$RUNTIME_INSPECTOR")
+
+    [[ -n "$INSPECT_DOCUMENT_ROOT" ]] || fail "runtime inspector did not return document_root"
+    [[ -n "$INSPECT_HTTP_HOST" ]] || fail "runtime inspector did not return http_host"
+    [[ -n "$INSPECT_BASE_DIR" ]] || fail "runtime inspector did not return base_dir"
+}
+
+print_diagnose_text() {
+    cat <<EOF
+site: $SITE
+code_mount_path: $APP_ROOT
+site_mount_path: $SITE_ROOT_BASE
+app_root: $APP_ROOT
+site_root: $SITE_ROOT
+legacy_site_path: $LEGACY_SITE_PATH
+document_root: $DOCUMENT_ROOT
+runtime_mode: $RUNTIME_MODE
+bootstrap_profile: $BOOTSTRAP_PROFILE
+bootstrap_file: $PHP_BOOTSTRAP
+laravel_artisan: $LARAVEL_ARTISAN
+effective_document_root: $INSPECT_DOCUMENT_ROOT
+effective_http_host: $INSPECT_HTTP_HOST
+effective_server_name: $INSPECT_SERVER_NAME
+effective_request_scheme: $INSPECT_REQUEST_SCHEME
+effective_base_dir: $INSPECT_BASE_DIR
+effective_database_name: $INSPECT_DATABASE_NAME
+effective_global_database_name: $INSPECT_GLOBAL_DATABASE_NAME
+effective_company_logo: $INSPECT_COMPANY_LOGO
+EOF
+}
+
+print_diagnose_json() {
+    cat <<EOF
+{
+  "site": "$(json_escape "$SITE")",
+  "code_mount_path": "$(json_escape "$APP_ROOT")",
+  "site_mount_path": "$(json_escape "$SITE_ROOT_BASE")",
+  "app_root": "$(json_escape "$APP_ROOT")",
+  "site_root": "$(json_escape "$SITE_ROOT")",
+  "legacy_site_path": "$(json_escape "$LEGACY_SITE_PATH")",
+  "document_root": "$(json_escape "$DOCUMENT_ROOT")",
+  "runtime_mode": "$(json_escape "$RUNTIME_MODE")",
+  "bootstrap_profile": "$(json_escape "$BOOTSTRAP_PROFILE")",
+  "bootstrap_file": "$(json_escape "$PHP_BOOTSTRAP")",
+  "laravel_artisan": "$(json_escape "$LARAVEL_ARTISAN")",
+  "effective_document_root": "$(json_escape "$INSPECT_DOCUMENT_ROOT")",
+  "effective_http_host": "$(json_escape "$INSPECT_HTTP_HOST")",
+  "effective_server_name": "$(json_escape "$INSPECT_SERVER_NAME")",
+  "effective_request_scheme": "$(json_escape "$INSPECT_REQUEST_SCHEME")",
+  "effective_base_dir": "$(json_escape "$INSPECT_BASE_DIR")",
+  "effective_database_name": "$(json_escape "$INSPECT_DATABASE_NAME")",
+  "effective_global_database_name": "$(json_escape "$INSPECT_GLOBAL_DATABASE_NAME")",
+  "effective_company_logo": "$(json_escape "$INSPECT_COMPANY_LOGO")"
+}
+EOF
+}
+
+prepare_runtime() {
+    ensure_site_bridge
+    export_runtime_env
+}
+
+resolve_phpunit_entrypoint() {
+    local resolved_path=""
+
+    resolved_path="$(php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT_BOOTSTRAP_HELPER" --print-phpunit-bin)"
+    [[ -n "$resolved_path" ]] || fail "PHPUnit bootstrap helper returned an empty path: $PHPUNIT_BOOTSTRAP_HELPER"
+    [[ -f "$resolved_path" ]] || fail "PHPUnit entrypoint not found: $resolved_path"
+
+    PHPUNIT="$resolved_path"
+}
+
+run_diagnose() {
+    init_context_defaults
+    parse_shared_options "$@"
+    [[ ${#REMAINING_ARGS[@]} -eq 0 ]] || fail "diagnose does not accept positional arguments"
+
+    resolve_context
+    RUNTIME_MODE="diagnose"
+    run_runtime_inspector
+
+    case "$OUTPUT_FORMAT" in
+        json)
+            print_diagnose_json
+            ;;
+        text)
+            print_diagnose_text
+            ;;
+        *)
+            fail "unsupported --format '$OUTPUT_FORMAT'; expected json or text"
+            ;;
+    esac
+}
+
+run_php() {
+    local command_name=""
+
+    init_context_defaults
+    parse_shared_options "$@"
+    resolve_context
+    RUNTIME_MODE="run"
+
+    [[ ${#REMAINING_ARGS[@]} -gt 0 ]] || fail "run requires a command after --"
+
+    prepare_runtime
+    command_name="$(basename "${REMAINING_ARGS[0]}")"
+
+    if [[ "$command_name" == php* ]]; then
+        exec "${REMAINING_ARGS[0]}" -d "auto_prepend_file=$PHP_BOOTSTRAP" "${REMAINING_ARGS[@]:1}"
+    fi
+
+    exec "${REMAINING_ARGS[@]}"
+}
+
+run_artisan() {
+    init_context_defaults
+    parse_shared_options "$@"
+    resolve_context
+    RUNTIME_MODE="artisan"
+
+    [[ ${#REMAINING_ARGS[@]} -gt 0 ]] || fail "artisan requires arguments after --"
+
+    prepare_runtime
+    cd "$APP_ROOT/vivid"
+    exec php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$LARAVEL_ARTISAN" "${REMAINING_ARGS[@]}"
+}
+
+run_test() {
+    local unit_target=""
+    local filter_name=""
+    local passthrough=()
+    local phpunit_args=()
+
+    init_context_defaults
+    parse_shared_options "$@"
+
+    while [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; do
+        case "${REMAINING_ARGS[0]}" in
+            --unit)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--unit requires a value"
+                unit_target="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --filter)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--filter requires a value"
+                filter_name="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --)
+                passthrough=("${REMAINING_ARGS[@]:1}")
+                REMAINING_ARGS=()
+                ;;
+            *)
+                fail "unknown option for test: ${REMAINING_ARGS[0]}"
+                ;;
+        esac
+    done
+
+    resolve_context
+    RUNTIME_MODE="test"
+
+    if [[ -z "$unit_target" && -z "$filter_name" ]]; then
+        fail "test requires at least one of --unit or --filter"
+    fi
+
+    if [[ -z "$unit_target" ]]; then
+        unit_target="$DEFAULT_UNIT_TARGET"
+    fi
+
+    if [[ -n "$filter_name" ]]; then
+        phpunit_args+=(--filter "$filter_name")
+    fi
+    phpunit_args+=("$unit_target")
+    if [[ ${#passthrough[@]} -gt 0 ]]; then
+        phpunit_args+=("${passthrough[@]}")
+    fi
+
+    prepare_runtime
+    resolve_phpunit_entrypoint
+    cd "$APP_ROOT/vivid"
+    exec php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}"
+}
+
+run_tdd() {
+    local phase=""
+    local test_file=""
+    local methods_csv=""
+    local lane="vivid-unit"
+    local passthrough=()
+    local phpunit_args=()
+    local junit_file=""
+    local stdout_file=""
+    local stderr_file=""
+    local filter_pattern=""
+    local raw_status=0
+    local command_used=""
+    local parser_status=0
+    local parser_output=""
+    local parser_format="$DEFAULT_TDD_OUTPUT_FORMAT"
+
+    init_context_defaults
+    OUTPUT_FORMAT="$DEFAULT_TDD_OUTPUT_FORMAT"
+    parse_shared_options "$@"
+    parser_format="$OUTPUT_FORMAT"
+
+    while [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; do
+        case "${REMAINING_ARGS[0]}" in
+            --phase)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--phase requires a value"
+                phase="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --file|--test-file)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "${REMAINING_ARGS[0]} requires a value"
+                test_file="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --methods)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--methods requires a value"
+                methods_csv="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --lane)
+                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--lane requires a value"
+                lane="${REMAINING_ARGS[1]}"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
+                ;;
+            --json)
+                parser_format="json"
+                REMAINING_ARGS=("${REMAINING_ARGS[@]:1}")
+                ;;
+            --)
+                passthrough=("${REMAINING_ARGS[@]:1}")
+                REMAINING_ARGS=()
+                ;;
+            *)
+                fail "unknown option for tdd-run: ${REMAINING_ARGS[0]}"
+                ;;
+        esac
+    done
+
+    phase="$(printf '%s' "$phase" | tr '[:lower:]' '[:upper:]')"
+    [[ "$phase" == "RED" || "$phase" == "GREEN" ]] || fail "unsupported --phase '$phase'; expected RED or GREEN"
+    [[ -n "$test_file" ]] || fail "tdd-run requires --file <path>"
+    [[ "$parser_format" == "json" || "$parser_format" == "text" ]] || fail "unsupported --format '$parser_format'; expected json or text"
+
+    resolve_context
+    RUNTIME_MODE="tdd_run"
+
+    prepare_runtime
+    resolve_phpunit_entrypoint
+    [[ -f "$DEFAULT_TDD_RESULT_PARSER" ]] || fail "TDD result parser not found: $DEFAULT_TDD_RESULT_PARSER"
+
+    if [[ -n "$methods_csv" ]]; then
+        filter_pattern="$(build_exact_methods_filter "$methods_csv")"
+    fi
+
+    junit_file="$(mktemp /tmp/view-local-junit.XXXXXX)"
+    stdout_file="$(mktemp /tmp/view-local-tdd-stdout.XXXXXX)"
+    stderr_file="$(mktemp /tmp/view-local-tdd-stderr.XXXXXX)"
+
+    phpunit_args+=(--configuration "$APP_ROOT/vivid/phpunit.xml")
+    phpunit_args+=(--log-junit "$junit_file")
+    if [[ -n "$filter_pattern" ]]; then
+        phpunit_args+=(--filter "$filter_pattern")
+    fi
+    phpunit_args+=("$test_file")
+    if [[ ${#passthrough[@]} -gt 0 ]]; then
+        phpunit_args+=("${passthrough[@]}")
+    fi
+
+    command_used="$(join_command_for_display php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}")"
+
+    cd "$APP_ROOT/vivid"
+    set +e
+    php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}" >"$stdout_file" 2>"$stderr_file"
+    raw_status=$?
+    set -e
+
+    set +e
+    parser_output="$(
+        php "$DEFAULT_TDD_RESULT_PARSER" \
+            --format "$parser_format" \
+            --phase "$phase" \
+            --site "$SITE" \
+            --lane "$lane" \
+            --test-file "$test_file" \
+            --methods "$methods_csv" \
+            --resolved-phpunit-path "$PHPUNIT" \
+            --command-used "$command_used" \
+            --raw-exit-code "$raw_status" \
+            --junit "$junit_file" \
+            --stdout-file "$stdout_file" \
+            --stderr-file "$stderr_file"
+    )"
+    parser_status=$?
+    set -e
+
+    rm -f "$junit_file" "$stdout_file" "$stderr_file"
+
+    printf '%s\n' "$parser_output"
+    return "$parser_status"
+}
+
+main() {
+    [[ $# -gt 0 ]] || {
+        usage
+        exit 1
+    }
+
+    case "$1" in
+        prepare-sites)
+            shift
+            run_prepare_sites "$@"
+            ;;
+        diagnose)
+            shift
+            run_diagnose "$@"
+            ;;
+        run)
+            shift
+            run_php "$@"
+            ;;
+        artisan)
+            shift
+            run_artisan "$@"
+            ;;
+        test)
+            shift
+            run_test "$@"
+            ;;
+        tdd-run)
+            shift
+            run_tdd "$@"
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            fail "unknown command: $1"
+            ;;
+    esac
+}
+
+main "$@"

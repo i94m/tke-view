@@ -92,14 +92,20 @@ COPY src/pdflib.ini /etc/php/${PHP_VERSION}/fpm/conf.d/pdflib.ini
 # 配置 apache2
 COPY src/httpd.conf /etc/apache2/apache2.conf
 COPY src/sites /etc/apache2/sites-enabled/
+COPY src/local /usr/local/bin/view-local
+COPY src/local-runtime/ /usr/local/lib/tke-local/
 
 # ---------- init ----------
 COPY src/entrypoint.sh /run/entrypoint.sh
+COPY src/healthcheck.sh /run/healthcheck.sh
 COPY src/init.sh /run/init.sh
 RUN sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/entrypoint.sh && \
-    chmod +x /run/entrypoint.sh /run/init.sh
+    sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/healthcheck.sh && \
+    ln -sf /usr/local/bin/view-local /usr/local/bin/local && \
+    chmod +x /run/entrypoint.sh /run/healthcheck.sh /run/init.sh /usr/local/bin/view-local
 
 CMD ["/run/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/run/healthcheck.sh"]
 EXPOSE 80
 
 # 添加架构标签

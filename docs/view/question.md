@@ -2,7 +2,13 @@
 
 ## 1.执行php脚本时报错
 
-在运行php脚本如 `php sys/lib/test.php` 时会报错，这是因为这些脚本的代码中使用了类似 `$_ENV['HOME']` 的环境变量，所以需要使用 **特定用户** 进入容器。
+优先使用镜像内置的 `local run` 命令。直接执行 `php ...` 时，它会自动补齐 `HOME`、`DOCUMENT_ROOT` 和 `HTTP_HOST` 等本地运行时变量，并注入 CLI bootstrap。
+<br><br>
+```shell
+docker exec -it local local run --site hk -- php sys/lib/test.php
+```
+
+如果需要进入交互式 shell 再手动执行脚本，仍然建议使用 `tk` 用户。
 <br><br>
 ```shell
 docker exec --user tk -it local bash
@@ -13,7 +19,7 @@ docker exec --user tk -it local bash
 echo $HOME
 ```
 
-容器中的用户和其对应的目录
+容器中的用户和其对应的目录：
 
 | 用户名 | 用户目录    |
 |-----|---------|

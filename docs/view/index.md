@@ -12,6 +12,11 @@
 | /opt/sites | 国家配置文件，例如global,hk |
 | /opt/tk | View代码目录 |
 
+容器日志默认输出到 stdout / stderr，可直接使用：
+```shell
+docker logs -f local
+```
+
 ## 创建容器
 
 ### 使用Docker run命令
@@ -126,15 +131,49 @@ docker-compose -p tke up -d
 ```
 :::
 
-## 项目初始化
+## CLI 平台命令
 
-运行命令 `docker exec -it local /run/init.sh <你的8ID>`
+如果本地代码仓库里已经带有宿主机入口 `bin/local`，优先使用它完成初始化、启动、浏览器登录和 TDD：
 
-例如
 ```shell
-docker exec -it local /run/init.sh 80000570
+bin/local init
+bin/local up
+bin/local xdebug status
+bin/local open
+bin/local login --8id 80000570
+bin/local test --filter SearchScreenServiceTest --unit tests/Unit/Services/Nps
 ```
 
-8ID用于代码自动登录。
+`bin/local` 会把个人配置写到 `~/.tke-local/config.env`，并通过运行时生成的 site `config.php` 注入你的 MySQL 凭据，不会再去修改挂载代码。Xdebug 现在默认以 `VIEW_LOCAL_XDEBUG_MODE=off` 启动；需要断点时用 `bin/local xdebug on`，调试完成后再 `bin/local xdebug off`。
 
-至此本地环境已经搭建好了，尝试访问: [http://hk.local.test](http://hk.local.test)
+容器启动后，也可以直接使用镜像内置的 `local` 命令执行诊断、Laravel CLI 和单元测试。这些命令会自动补齐：
+
+- `HOME=/opt/tk`
+- `DOCUMENT_ROOT=/opt/tk/web`
+- `HTTP_HOST=<site>.local.test`
+- 站点桥接 `/opt/<site>` -> `/opt/sites/<site>`
+
+其中默认 host 会直接沿用 site 目录名，所以本机已有 `hk.local.test`、`china.local.test`、`global.local.test` 这类 hosts 记录时可以直接使用。
+
+示例：
+
+```shell
+docker exec -it local local diagnose --site hk --format text
+docker exec -it local local run --site hk -- php sys/lib/test.php
+docker exec -it local local artisan --site hk -- list
+docker exec -it local local test --site hk --unit tests/Unit/Services/Nps/SearchScreenServiceTest.php
+```
+
+`diagnose` 会同时验证实际 PHP bootstrap 结果，输出当前站点对应的 `DATABASE_NAME`、`HTTP_HOST` 等关键信息。`local run` 在直接执行 `php ...` 时会自动注入 CLI bootstrap。镜像内的 Xdebug 改为 `start_with_request=trigger`，所以在 `bin/local xdebug on` 之后，只有带 `XDEBUG_TRIGGER` 的请求才会真正连 IDE。
+
+## 浏览器本地登录
+
+如果使用 `bin/local`，推荐直接执行：
+
+```shell
+bin/local open
+bin/local open --raw
+bin/local login --8id 80000570
+```
+
+默认会使用 `http://<site>.local.test:<port>`。如果 `VIEW_LOCAL_DEFAULT_8ID`、`VIEW_LOCAL_LOGIN_SECRET`、`VIEW_LOCAL_LOGIN_ENABLED=1` 已经配置，`bin/local open` 会直接触发本地自动登录；只有 `bin/local open --raw` 才会打开裸 `login.php`。如果你要切换到另一组已有 hosts，例如 `preview`、`dev2`、`rc`，可以把 `VIEW_LOCAL_HOST_TEMPLATE` 改成 `%s.preview.test`、`%s.dev2.test`、`%s.rc.test`。`VIEW_LOCAL_SITE_HOST_ALIASES` 保留为可选项，只有在 host 名和 site 目录名不一致时才需要配置。
