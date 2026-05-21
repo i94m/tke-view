@@ -25,6 +25,7 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
         tzdata \
         apache2 \
         memcached \
+        redis-server \
         lsb-release \
         apt-transport-https && \
     update-ca-certificates && \
@@ -92,6 +93,10 @@ COPY src/pdflib.ini /etc/php/${PHP_VERSION}/fpm/conf.d/pdflib.ini
 # 配置 apache2
 COPY src/httpd.conf /etc/apache2/apache2.conf
 COPY src/sites /etc/apache2/sites-enabled/
+
+# 配置项目
+COPY src/log4php_config.xml /opt/local/log4php_config.xml
+COPY src/redisconfig /opt/local/redisconfig
 
 # ---------- init ----------
 COPY src/entrypoint.sh /run/entrypoint.sh

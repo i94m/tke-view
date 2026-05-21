@@ -6,6 +6,9 @@ echo "Running on architecture: $(uname -m)"
 # 启动 memcached
 /etc/init.d/memcached start
 
+# 启动 redis
+/etc/init.d/redis-server start
+
 # 启动 php-fpm
 # shellcheck disable=SC1083
 /etc/init.d/php{VERSION}-fpm start
