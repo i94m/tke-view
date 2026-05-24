@@ -5,7 +5,7 @@ if [ ! "$1" ]; then
     exit 1;
 fi
 
-corePath=/opt/tk
+corePath=/opt/tk/core
 user8ID=${1}
 
 if [ ! "$(ls -A $corePath)" ]; then
