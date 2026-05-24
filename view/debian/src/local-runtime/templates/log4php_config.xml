@@ -1,0 +1,92 @@
+<configuration xmlns="http://logging.apache.org/log4php/">
+    <!-- if need open, class must be 'LoggerAppenderDailyFile', if need close, class must be 'LoggerAppenderNull' -->
+    <appender name="ViewAppender" class="LoggerAppenderModuleMongoDB">
+        <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%m%n" />
+        </layout>
+        <param name="file" value="/var/log/View/view_log_hk_daily_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+        <param name="defaultCollectionName" value="view_mongo" />
+    </appender>
+    <appender name="SelfServiceAppender" class="LoggerAppenderDailyFile">
+        <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%-5level %date{Y-m-d H:i:s,u} %msg%n" />
+        </layout>
+        <param name="file" value="/var/log/SelfService/SelfService_log_hk_daily_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+    </appender>
+    <appender name="SearchEngineAppender" class="LoggerAppenderDailyFile">
+        <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%-5level %date{Y-m-d H:i:s,u} %msg%n" />
+        </layout>
+        <param name="file" value="/var/log/View/SelfEngine_log_hk_daily_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+    </appender>
+    <appender name="MongodbThreeMonthsAppender" class="LoggerAppenderViewMongoDB">
+         <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%d{Y-m-d H:i:s.u} %p %m%n" />
+        </layout>
+        <param name="file" value="/var/log/View/daily_hk_mongodb_three_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+        <param name="collectionName" value="view_mongo_three" />
+    </appender>
+    <appender name="MongodbSixMonthsAppender" class="LoggerAppenderViewMongoDB">
+         <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%d{Y-m-d H:i:s.u} %p %m%n" />
+        </layout>
+        <param name="file" value="/var/log/View/daily_hk_mongodb_six_%s.log" />
+        <param name="datePattern" value="Ymd" />
+		<param name="append" value="true" />
+        <param name="collectionName" value="view_mongo_six" />
+    </appender>
+    <appender name="MongodbTwelveMonthsAppender" class="LoggerAppenderViewMongoDB">
+         <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%d{Y-m-d H:i:s.u} %p %m%n" />
+        </layout>
+        <param name="file" value="/var/log/View/daily_hk_mongodb_twelve_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+        <param name="collectionName" value="view_mongo_twelve" />
+    </appender>
+        <appender name="MongodbCustomizedAppender" class="LoggerAppenderViewMongoDB">
+         <layout class="LoggerLayoutPattern">
+            <param name="conversionPattern" value="%d{Y-m-d H:i:s.u} %p %m%n" />
+        </layout>
+        <param name="file" value="/var/log/View/daily_hk_mongodb_info_%s.log" />
+        <param name="datePattern" value="Ymd" />
+        <param name="append" value="true" />
+        <param name="collectionName" value="view_mongo_customized" />
+    </appender>
+    <logger name="ViewLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="ViewAppender" />
+    </logger>
+    <logger name="MongodbThreeMonthsLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="MongodbThreeMonthsAppender" />
+    </logger>
+    <logger name="MongodbSixMonthsLogger">
+        <level value="DEBUG" />
+		<appender_ref ref="MongodbSixMonthsAppender" />
+    </logger>
+    <logger name="MongodbTwelveMonthsLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="MongodbTwelveMonthsAppender" />
+    </logger>
+        <logger name="MongodbCustomizedLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="MongodbCustomizedAppender" />
+    </logger>
+    <logger name="SelfServiceLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="SelfServiceAppender" />
+    </logger>
+    <logger name="SearchEngineLogger">
+        <level value="DEBUG" />
+        <appender_ref ref="SearchEngineAppender" />
+    </logger>
+</configuration>
