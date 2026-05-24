@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-DEFAULT_APP_ROOT="${VIEW_APP_ROOT:-/opt/tk}"
+DEFAULT_APP_ROOT="${VIEW_APP_ROOT:-/opt/tk/core}"
+DEFAULT_TK_ROOT="${VIEW_TK_PATH:-/opt/tk}"
 DEFAULT_SITE_ROOT_BASE="${VIEW_SITE_ROOT_BASE:-/opt/sites}"
 DEFAULT_DOCUMENT_ROOT_SUFFIX="/web"
 DEFAULT_PHP_BOOTSTRAP="${VIEW_PHP_BOOTSTRAP:-/usr/local/lib/tke-local/php-cli-bootstrap.php}"
@@ -11,7 +12,12 @@ DEFAULT_LARAVEL_ARTISAN_RELATIVE_PATH="vivid/artisan"
 DEFAULT_PHPUNIT_BOOTSTRAP_RELATIVE_PATH="vivid/tests/bootstrap.php"
 DEFAULT_UNIT_TARGET="tests/Unit/Services"
 DEFAULT_TDD_RESULT_PARSER="${VIEW_TDD_RESULT_PARSER:-/usr/local/lib/tke-local/parse-phpunit-junit.php}"
+DEFAULT_TDD_LANE_RESOLVER="${VIEW_TDD_LANE_RESOLVER:-}"
+DEFAULT_TDD_CONTRACT_INSPECTOR="${VIEW_TDD_CONTRACT_INSPECTOR:-}"
 DEFAULT_TDD_OUTPUT_FORMAT="text"
+DEFAULT_AUTOTEST_ROOT="${VIEW_AUTOTEST_ROOT:-/opt/autotest}"
+DEFAULT_SHARP_PHP_BOOTSTRAP="${VIEW_SHARP_PHP_BOOTSTRAP:-}"
+DEFAULT_TKE_LOCAL_LIB="${VIEW_LOCAL_RUNTIME_DIR:-/usr/local/lib/tke-local}"
 
 usage() {
     cat <<'EOF'
@@ -21,14 +27,18 @@ Usage:
   local run --site <site> -- <command...>
   local artisan --site <site> -- <artisan-args...>
   local test --site <site> [--unit <path>] [--filter <name>] [-- <phpunit-args...>]
-  local tdd-run --site <site> --phase <RED|GREEN> --file <path> [--methods <csv>] [--lane <name>] [--json] [-- <phpunit-args...>]
+  local inspect-contract --site <site> [--format json|text]
+  local preflight-tdd --site <site> [--format json|text]
+  local tdd-run --site <site> --phase <RED|GREEN> --file <path> [--methods <csv>] [--lane <name>] [--json] [--skip-preflight] [-- <phpunit-args...>]
 
 Commands:
   prepare-sites  Ensure legacy /opt/<site> bridge paths exist for mounted site directories.
   diagnose    Resolve the runtime contract and verify the effective PHP site bootstrap.
+  inspect-contract  Print machine-readable TDD lane/runtime contract for agents.
   run         Execute a command with local runtime environment variables exported.
   artisan     Execute the repo's Laravel artisan entrypoint with the local runtime bootstrap.
   test        Execute focused PHPUnit unit tests with the local runtime bootstrap.
+  preflight-tdd  Validate site/phpunit/autotest readiness (uses RESOLVED_LANE from env).
   tdd-run     Execute one focused TDD verification pass and classify the result.
 
 Examples:
@@ -208,46 +218,181 @@ init_context_defaults() {
     APP_ROOT="$DEFAULT_APP_ROOT"
     SITE_ROOT_BASE="$DEFAULT_SITE_ROOT_BASE"
     OUTPUT_FORMAT="json"
+    PARSE_phase=""
+    PARSE_test_file=""
+    PARSE_methods_csv=""
+    PARSE_lane=""
+    PARSE_parser_json=""
+    PARSE_skip_preflight=""
+    PARSE_unit_target=""
+    PARSE_filter_name=""
 }
 
-parse_shared_options() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --site)
-                [[ $# -ge 2 ]] || fail "--site requires a value"
-                SITE="$2"
-                shift 2
-                ;;
-            --app-root|--code-mount-path)
-                [[ $# -ge 2 ]] || fail "$1 requires a value"
-                APP_ROOT="$2"
-                shift 2
-                ;;
-            --site-root-base|--site-mount-path)
-                [[ $# -ge 2 ]] || fail "$1 requires a value"
-                SITE_ROOT_BASE="$2"
-                shift 2
-                ;;
-            --format)
-                [[ $# -ge 2 ]] || fail "--format requires a value"
-                OUTPUT_FORMAT="$2"
-                shift 2
-                ;;
+parse_local_options() {
+    local command="$1"
+    shift
+    local args=("$@")
+    local unparsed=()
+    local passthrough=()
+    local in_passthrough=false
+  local index=0
+    local arg=""
+    local value=""
+
+    init_context_defaults
+    if [[ "$command" == "tdd-run" ]]; then
+        OUTPUT_FORMAT="$DEFAULT_TDD_OUTPUT_FORMAT"
+    fi
+
+    while (( index < ${#args[@]} )); do
+        if [[ "$in_passthrough" == true ]]; then
+            passthrough+=("${args[index]}")
+            index=$((index + 1))
+            continue
+        fi
+
+        arg="${args[index]}"
+        value="${args[index + 1]:-}"
+
+        case "$arg" in
             --)
-                shift
-                break
+                in_passthrough=true
+                index=$((index + 1))
                 ;;
             -h|--help)
                 usage
                 exit 0
                 ;;
+            --site)
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                SITE="$value"
+                index=$((index + 2))
+                ;;
+            --site=*)
+                SITE="${arg#--site=}"
+                [[ -n "$SITE" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --app-root|--code-mount-path)
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                APP_ROOT="$value"
+                index=$((index + 2))
+                ;;
+            --site-root-base|--site-mount-path)
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                SITE_ROOT_BASE="$value"
+                index=$((index + 2))
+                ;;
+            --format)
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                OUTPUT_FORMAT="$value"
+                index=$((index + 2))
+                ;;
+            --format=*)
+                OUTPUT_FORMAT="${arg#--format=}"
+                [[ -n "$OUTPUT_FORMAT" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --phase)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_phase="$value"
+                index=$((index + 2))
+                ;;
+            --phase=*)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                PARSE_phase="${arg#--phase=}"
+                [[ -n "$PARSE_phase" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --file|--test-file)
+                [[ "$command" == "tdd-run" || "$command" == "preflight-tdd" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_test_file="$value"
+                index=$((index + 2))
+                ;;
+            --file=*|--test-file=*)
+                [[ "$command" == "tdd-run" || "$command" == "preflight-tdd" ]] || fail "unknown option for $command: $arg"
+                PARSE_test_file="${arg#*=}"
+                [[ -n "$PARSE_test_file" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --methods)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_methods_csv="$value"
+                index=$((index + 2))
+                ;;
+            --methods=*)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                PARSE_methods_csv="${arg#--methods=}"
+                [[ -n "$PARSE_methods_csv" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --lane)
+                [[ "$command" == "tdd-run" || "$command" == "preflight-tdd" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_lane="$value"
+                index=$((index + 2))
+                ;;
+            --lane=*)
+                [[ "$command" == "tdd-run" || "$command" == "preflight-tdd" ]] || fail "unknown option for $command: $arg"
+                PARSE_lane="${arg#--lane=}"
+                [[ -n "$PARSE_lane" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --json)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                PARSE_parser_json="json"
+                index=$((index + 1))
+                ;;
+            --skip-preflight)
+                [[ "$command" == "tdd-run" ]] || fail "unknown option for $command: $arg"
+                PARSE_skip_preflight=true
+                index=$((index + 1))
+                ;;
+            --unit)
+                [[ "$command" == "test" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_unit_target="$value"
+                index=$((index + 2))
+                ;;
+            --unit=*)
+                [[ "$command" == "test" ]] || fail "unknown option for $command: $arg"
+                PARSE_unit_target="${arg#--unit=}"
+                [[ -n "$PARSE_unit_target" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
+            --filter)
+                [[ "$command" == "test" ]] || fail "unknown option for $command: $arg"
+                [[ -n "$value" && "$value" != --* ]] || fail "$arg requires a value"
+                PARSE_filter_name="$value"
+                index=$((index + 2))
+                ;;
+            --filter=*)
+                [[ "$command" == "test" ]] || fail "unknown option for $command: $arg"
+                PARSE_filter_name="${arg#--filter=}"
+                [[ -n "$PARSE_filter_name" ]] || fail "$arg requires a value"
+                index=$((index + 1))
+                ;;
             *)
-                break
+                unparsed+=("$arg")
+                index=$((index + 1))
                 ;;
         esac
     done
 
-    REMAINING_ARGS=("$@")
+    case "$command" in
+        run|artisan)
+            REMAINING_ARGS=("${unparsed[@]}" "${passthrough[@]}")
+            ;;
+        *)
+            if [[ ${#unparsed[@]} -gt 0 ]]; then
+                fail "unknown option for $command: ${unparsed[0]}"
+            fi
+            REMAINING_ARGS=("${passthrough[@]}")
+            ;;
+    esac
 }
 
 resolve_context() {
@@ -299,10 +444,58 @@ ensure_site_bridge() {
 export_runtime_env() {
     export VIEW_SITE="$SITE"
     export VIEW_SITE_ROOT="$SITE_ROOT"
+    export VIEW_TK_PATH="${VIEW_TK_PATH:-$DEFAULT_TK_ROOT}"
     export VIEW_APP_ROOT="$APP_ROOT"
     export DOCUMENT_ROOT="$DOCUMENT_ROOT"
+    export VIEW_AUTOTEST_ROOT="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
     export HOME="$APP_ROOT"
     export REQUEST_SCHEME="http"
+}
+
+resolve_sharp_php_bootstrap() {
+    if [[ -n "$DEFAULT_SHARP_PHP_BOOTSTRAP" && -f "$DEFAULT_SHARP_PHP_BOOTSTRAP" ]]; then
+        printf '%s\n' "$DEFAULT_SHARP_PHP_BOOTSTRAP"
+        return 0
+    fi
+
+    resolve_runtime_script_path sharp-cli-bootstrap.php
+}
+
+configure_phpunit_execution_for_profile() {
+    local profile="$1"
+    local test_file="$2"
+
+    PHPUNIT_EXEC_WORKDIR=""
+    PHPUNIT_EXEC_CONFIG=""
+    PHPUNIT_EXEC_TEST_PATH=""
+    PHPUNIT_EXEC_PREPEND="$PHP_BOOTSTRAP"
+
+    case "$profile" in
+        sharp-unit)
+            local autotest_root="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+            local relative="${test_file#autotest/phpunit/}"
+            local suite="${relative%%/*}"
+
+            [[ -n "$suite" ]] || fail "invalid autotest test file path: $test_file"
+            [[ -d "$autotest_root/phpunit" ]] || fail "autotest mount not found: $autotest_root/phpunit (set VIEW_LOCAL_AUTOTEST_PATH in bin/local init)"
+            PHPUNIT_EXEC_WORKDIR="$autotest_root/phpunit"
+            PHPUNIT_EXEC_CONFIG="$PHPUNIT_EXEC_WORKDIR/$suite/phpunit.xml"
+            PHPUNIT_EXEC_TEST_PATH="$relative"
+            PHPUNIT_EXEC_PREPEND="$(resolve_sharp_php_bootstrap)"
+            [[ -f "$PHPUNIT_EXEC_CONFIG" ]] || fail "phpunit config not found: $PHPUNIT_EXEC_CONFIG"
+            [[ -f "$PHPUNIT_EXEC_PREPEND" ]] || fail "sharp bootstrap not found: $PHPUNIT_EXEC_PREPEND"
+            ;;
+        vivid-unit|*)
+            PHPUNIT_EXEC_WORKDIR="$APP_ROOT/vivid"
+            PHPUNIT_EXEC_CONFIG="$APP_ROOT/vivid/phpunit.xml"
+            if [[ "$test_file" == vivid/* ]]; then
+                PHPUNIT_EXEC_TEST_PATH="${test_file#vivid/}"
+            else
+                PHPUNIT_EXEC_TEST_PATH="$test_file"
+            fi
+            PHPUNIT_EXEC_PREPEND="$PHP_BOOTSTRAP"
+            ;;
+    esac
 }
 
 run_runtime_inspector() {
@@ -393,6 +586,12 @@ EOF
 prepare_runtime() {
     ensure_site_bridge
     export_runtime_env
+    php "$DEFAULT_TKE_LOCAL_LIB/prepare-local-runtime-assets.php" >/dev/null \
+        || fail "failed to prepare local runtime assets (ViewLoggerConfig / log4php)"
+    if [[ -d "${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}/phpunit" ]]; then
+        php "$DEFAULT_TKE_LOCAL_LIB/prepare-autotest-bridges.php" >/dev/null \
+            || fail "failed to prepare autotest legacy path bridges"
+    fi
 }
 
 resolve_phpunit_entrypoint() {
@@ -406,8 +605,7 @@ resolve_phpunit_entrypoint() {
 }
 
 run_diagnose() {
-    init_context_defaults
-    parse_shared_options "$@"
+    parse_local_options "diagnose" "$@"
     [[ ${#REMAINING_ARGS[@]} -eq 0 ]] || fail "diagnose does not accept positional arguments"
 
     resolve_context
@@ -430,8 +628,7 @@ run_diagnose() {
 run_php() {
     local command_name=""
 
-    init_context_defaults
-    parse_shared_options "$@"
+    parse_local_options "run" "$@"
     resolve_context
     RUNTIME_MODE="run"
 
@@ -448,8 +645,7 @@ run_php() {
 }
 
 run_artisan() {
-    init_context_defaults
-    parse_shared_options "$@"
+    parse_local_options "artisan" "$@"
     resolve_context
     RUNTIME_MODE="artisan"
 
@@ -460,36 +656,287 @@ run_artisan() {
     exec php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$LARAVEL_ARTISAN" "${REMAINING_ARGS[@]}"
 }
 
+emit_tdd_lane_blocked() {
+    local phase="$1"
+    local site="$2"
+    local lane="$3"
+    local test_file="$4"
+    local profile="$5"
+    local message="$6"
+    local format="$7"
+    local methods_csv="${8:-}"
+
+    if [[ "$format" == "json" ]]; then
+        php -r '
+$phase = $argv[1];
+$site = $argv[2];
+$lane = $argv[3];
+$testFile = $argv[4];
+$profile = $argv[5];
+$message = $argv[6];
+$methods = array_values(array_filter(array_map("trim", explode(",", $argv[7] ?? ""))));
+echo json_encode([
+    "phase" => $phase,
+    "site" => $site,
+    "lane" => $lane,
+    "resolvedLane" => $lane,
+    "resolvedProfile" => $profile,
+    "testFile" => $testFile,
+    "targetedMethods" => $methods,
+    "resolvedPhpunitPath" => "",
+    "commandUsed" => "none",
+    "rawExitCode" => 3,
+    "resultType" => "environment_blocked",
+    "verdict" => "environment_blocked",
+    "failureCategory" => "environment_blocked",
+    "assertionSummary" => "none",
+    "environmentSummary" => $message,
+    "assertionEvidence" => "none",
+    "nonAssertionEvidence" => $message,
+    "missingMethods" => [],
+    "methodResults" => [],
+    "next" => "fix_environment",
+], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+' "$phase" "$site" "$lane" "$test_file" "$profile" "$message" "$methods_csv"
+        return 0
+    fi
+
+    cat <<EOF
+phase: ${phase}
+site: ${site}
+lane: ${lane}
+resolved_profile: ${profile}
+test_file: ${test_file}
+result_type: environment_blocked
+failure_category: lane_resolution
+environment_summary: ${message}
+next: fix_environment
+EOF
+}
+
+resolve_runtime_script_path() {
+    local script_name="$1"
+    local image_path="${DEFAULT_TKE_LOCAL_LIB}/${script_name}"
+
+    if [[ -n "$DEFAULT_TDD_LANE_RESOLVER" && "$script_name" == "resolve-tdd-lane.php" ]]; then
+        printf '%s\n' "$DEFAULT_TDD_LANE_RESOLVER"
+        return 0
+    fi
+    if [[ -n "$DEFAULT_TDD_CONTRACT_INSPECTOR" && "$script_name" == "inspect-tdd-contract.php" ]]; then
+        printf '%s\n' "$DEFAULT_TDD_CONTRACT_INSPECTOR"
+        return 0
+    fi
+    if [[ -f "$image_path" ]]; then
+        printf '%s\n' "$image_path"
+        return 0
+    fi
+
+    fail "runtime script not found: ${image_path} (rebuild image from tke-view/view/debian/src/local-runtime/)"
+}
+
+resolve_tdd_lane_or_block() {
+    local phase="$1"
+    local site="$2"
+    local test_file="$3"
+    local requested_lane="$4"
+    local output_format="$5"
+    local methods_csv="${6:-}"
+    local resolve_json=""
+    local resolve_status=0
+    local resolve_status_field=""
+    local resolved_lane=""
+    local resolved_profile=""
+    local resolve_message=""
+    local normalized_test_file=""
+    local lane_resolver=""
+
+    lane_resolver="$(resolve_runtime_script_path resolve-tdd-lane.php)"
+    [[ -f "$APP_ROOT/testing-contracts.json" ]] || fail "testing contracts not found: $APP_ROOT/testing-contracts.json"
+
+    set +e
+    resolve_json="$(php "$lane_resolver" \
+        --contracts "$APP_ROOT/testing-contracts.json" \
+        --test-file "$test_file" \
+        --lane "$requested_lane" \
+        --format json 2>&1)"
+    resolve_status=$?
+    set -e
+
+    resolve_status_field="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["status"]??""):"";')"
+    resolved_lane="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["resolvedLane"]??""):"";')"
+    resolved_profile="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["resolvedProfile"]??""):"";')"
+    resolve_message="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["message"]??""):"";')"
+    normalized_test_file="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["testFile"]??""):"";')"
+
+    if [[ $resolve_status -ne 0 || "$resolve_status_field" != "ok" ]]; then
+        emit_tdd_lane_blocked \
+            "$phase" \
+            "$site" \
+            "${resolved_lane:-unknown}" \
+            "${normalized_test_file:-$test_file}" \
+            "${resolved_profile:-unknown}" \
+            "${resolve_message:-$resolve_json}" \
+            "$output_format" \
+            "$methods_csv"
+        return 3
+    fi
+
+    RESOLVED_TDD_LANE="$resolved_lane"
+    RESOLVED_TDD_PROFILE="$resolved_profile"
+    RESOLVED_TDD_TEST_FILE="$normalized_test_file"
+    return 0
+}
+
+emit_tdd_preflight_blocked() {
+    local phase="$1"
+    local site="$2"
+    local lane="$3"
+    local profile="$4"
+    local test_file="$5"
+    local methods_csv="$6"
+    local preflight_json="$7"
+    local format="$8"
+
+    if [[ "$format" == "json" ]]; then
+        PREFLIGHT_JSON="$preflight_json" PHASE="$phase" SITE="$site" LANE="$lane" PROFILE="$profile" \
+            TEST_FILE="$test_file" METHODS_CSV="$methods_csv" php -r '
+$preflight = json_decode(getenv("PREFLIGHT_JSON"), true);
+if (!is_array($preflight)) {
+    $preflight = ["status" => "blocked", "message" => getenv("PREFLIGHT_JSON")];
+}
+$methods = array_values(array_filter(array_map("trim", explode(",", getenv("METHODS_CSV") ?: ""))));
+$hint = is_array($preflight) && isset($preflight["hint"]) ? (string) $preflight["hint"] : "Run: bin/local diagnose";
+$blockers = is_array($preflight) && isset($preflight["blockers"]) ? $preflight["blockers"] : [];
+$summary = $blockers !== [] ? "Preflight blocked: " . implode(", ", $blockers) : "Preflight blocked";
+echo json_encode([
+    "phase" => getenv("PHASE"),
+    "site" => getenv("SITE"),
+    "lane" => getenv("LANE"),
+    "resolvedLane" => getenv("LANE"),
+    "resolvedProfile" => getenv("PROFILE"),
+    "testFile" => getenv("TEST_FILE"),
+    "targetedMethods" => $methods,
+    "testMethods" => $methods,
+    "resolvedPhpunitPath" => "",
+    "commandUsed" => "none",
+    "rawExitCode" => 3,
+    "resultType" => "environment_blocked",
+    "verdict" => "environment_blocked",
+    "failureCategory" => "environment_blocked",
+    "assertionSummary" => "none",
+    "environmentSummary" => $summary,
+    "assertionEvidence" => "none",
+    "nonAssertionEvidence" => $summary,
+    "missingMethods" => [],
+    "methodResults" => [],
+    "preflightResult" => $preflight,
+    "next" => "diagnose",
+], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+'
+        return 0
+    fi
+
+    cat <<EOF
+phase: ${phase}
+site: ${site}
+lane: ${lane}
+resolved_profile: ${profile}
+test_file: ${test_file}
+result_type: environment_blocked
+failure_category: environment_blocked
+environment_summary: preflight blocked
+next: diagnose
+EOF
+}
+
+run_container_tdd_preflight() {
+    local site="$1"
+    local test_file="$2"
+    local format="$3"
+    local preflight_script=""
+    local preflight_json=""
+    local preflight_status=""
+    local status_field=""
+
+    preflight_script="$(resolve_runtime_script_path preflight-tdd.php)"
+
+    export RESOLVED_LANE="$RESOLVED_TDD_LANE"
+    export RESOLVED_PROFILE="$RESOLVED_TDD_PROFILE"
+    export RESOLVED_TEST_FILE="$test_file"
+    export VIEW_SITE="$site"
+    export VIEW_APP_ROOT="$APP_ROOT"
+    export VIEW_SITE_ROOT_BASE="$SITE_ROOT_BASE"
+    export VIEW_AUTOTEST_ROOT="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+
+    set +e
+    preflight_json="$(php "$preflight_script" --site "$site" --test-file "$test_file" --format json 2>&1)"
+    preflight_status=$?
+    set -e
+
+    status_field="$(PREFLIGHT_JSON="$preflight_json" php -r '$d=json_decode(getenv("PREFLIGHT_JSON"), true); echo is_array($d)?($d["status"]??""):"";')"
+
+    printf '%s\n' "$preflight_json"
+
+    if [[ $preflight_status -ne 0 || "$status_field" != "ready" ]]; then
+        return 2
+    fi
+
+    return 0
+}
+
+run_preflight_tdd_command() {
+    local test_file=""
+    local lane=""
+    local methods_csv=""
+
+    parse_local_options "preflight-tdd" "$@"
+    test_file="$PARSE_test_file"
+    lane="$PARSE_lane"
+
+    [[ -n "$test_file" ]] || fail "preflight-tdd requires --file <path>"
+
+    resolve_context
+    RUNTIME_MODE="preflight_tdd"
+
+    if ! resolve_tdd_lane_or_block "GREEN" "$SITE" "$test_file" "$lane" "$OUTPUT_FORMAT" "$methods_csv"; then
+        exit 3
+    fi
+
+    test_file="$RESOLVED_TDD_TEST_FILE"
+    prepare_runtime
+
+    if ! run_container_tdd_preflight "$SITE" "$test_file" "$OUTPUT_FORMAT"; then
+        exit 3
+    fi
+}
+
+run_inspect_contract() {
+    parse_local_options "inspect-contract" "$@"
+    [[ ${#REMAINING_ARGS[@]} -eq 0 ]] || fail "inspect-contract does not accept positional arguments"
+
+    resolve_context
+    RUNTIME_MODE="inspect_contract"
+
+    local contract_inspector
+    contract_inspector="$(resolve_runtime_script_path inspect-tdd-contract.php)"
+
+    php "$contract_inspector" \
+        --contracts "$APP_ROOT/testing-contracts.json" \
+        --app-root "$APP_ROOT" \
+        --site "$SITE" \
+        --format "$OUTPUT_FORMAT"
+}
+
 run_test() {
     local unit_target=""
     local filter_name=""
     local passthrough=()
     local phpunit_args=()
 
-    init_context_defaults
-    parse_shared_options "$@"
-
-    while [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; do
-        case "${REMAINING_ARGS[0]}" in
-            --unit)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--unit requires a value"
-                unit_target="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --filter)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--filter requires a value"
-                filter_name="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --)
-                passthrough=("${REMAINING_ARGS[@]:1}")
-                REMAINING_ARGS=()
-                ;;
-            *)
-                fail "unknown option for test: ${REMAINING_ARGS[0]}"
-                ;;
-        esac
-    done
+    parse_local_options "test" "$@"
+    unit_target="$PARSE_unit_target"
+    filter_name="$PARSE_filter_name"
+    passthrough=("${REMAINING_ARGS[@]}")
 
     resolve_context
     RUNTIME_MODE="test"
@@ -510,17 +957,45 @@ run_test() {
         phpunit_args+=("${passthrough[@]}")
     fi
 
+    local resolved_test_file="$unit_target"
+    local resolved_profile="vivid-unit"
+
+    if [[ "$unit_target" == autotest/phpunit/* ]]; then
+        if ! resolve_tdd_lane_or_block "GREEN" "$SITE" "$unit_target" "" "text" ""; then
+            exit 3
+        fi
+        resolved_test_file="$RESOLVED_TDD_TEST_FILE"
+        resolved_profile="$RESOLVED_TDD_PROFILE"
+    fi
+
     prepare_runtime
+    configure_phpunit_execution_for_profile "$resolved_profile" "$resolved_test_file"
     resolve_phpunit_entrypoint
-    cd "$APP_ROOT/vivid"
-    exec php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}"
+
+    if [[ "$resolved_profile" == "sharp-unit" ]]; then
+        phpunit_args=()
+        if [[ -n "$filter_name" ]]; then
+            phpunit_args+=(--filter "$filter_name")
+        fi
+        phpunit_args+=(--configuration "$PHPUNIT_EXEC_CONFIG")
+        phpunit_args+=("$PHPUNIT_EXEC_TEST_PATH")
+        if [[ ${#passthrough[@]} -gt 0 ]]; then
+            phpunit_args+=("${passthrough[@]}")
+        fi
+        cd "$PHPUNIT_EXEC_WORKDIR"
+        exec php -d "auto_prepend_file=$PHPUNIT_EXEC_PREPEND" "$PHPUNIT" "${phpunit_args[@]}"
+    fi
+
+    cd "$PHPUNIT_EXEC_WORKDIR"
+    exec php -d "auto_prepend_file=$PHPUNIT_EXEC_PREPEND" "$PHPUNIT" "${phpunit_args[@]}"
 }
 
 run_tdd() {
     local phase=""
     local test_file=""
     local methods_csv=""
-    local lane="vivid-unit"
+    local lane=""
+    local skip_preflight=false
     local passthrough=()
     local phpunit_args=()
     local junit_file=""
@@ -533,46 +1008,19 @@ run_tdd() {
     local parser_output=""
     local parser_format="$DEFAULT_TDD_OUTPUT_FORMAT"
 
-    init_context_defaults
-    OUTPUT_FORMAT="$DEFAULT_TDD_OUTPUT_FORMAT"
-    parse_shared_options "$@"
+    parse_local_options "tdd-run" "$@"
+    phase="$PARSE_phase"
+    test_file="$PARSE_test_file"
+    methods_csv="$PARSE_methods_csv"
+    lane="$PARSE_lane"
+    if [[ "$PARSE_skip_preflight" == true ]]; then
+        skip_preflight=true
+    fi
     parser_format="$OUTPUT_FORMAT"
-
-    while [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; do
-        case "${REMAINING_ARGS[0]}" in
-            --phase)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--phase requires a value"
-                phase="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --file|--test-file)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "${REMAINING_ARGS[0]} requires a value"
-                test_file="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --methods)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--methods requires a value"
-                methods_csv="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --lane)
-                [[ ${#REMAINING_ARGS[@]} -ge 2 ]] || fail "--lane requires a value"
-                lane="${REMAINING_ARGS[1]}"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:2}")
-                ;;
-            --json)
-                parser_format="json"
-                REMAINING_ARGS=("${REMAINING_ARGS[@]:1}")
-                ;;
-            --)
-                passthrough=("${REMAINING_ARGS[@]:1}")
-                REMAINING_ARGS=()
-                ;;
-            *)
-                fail "unknown option for tdd-run: ${REMAINING_ARGS[0]}"
-                ;;
-        esac
-    done
+    if [[ -n "$PARSE_parser_json" ]]; then
+        parser_format="$PARSE_parser_json"
+    fi
+    passthrough=("${REMAINING_ARGS[@]}")
 
     phase="$(printf '%s' "$phase" | tr '[:lower:]' '[:upper:]')"
     [[ "$phase" == "RED" || "$phase" == "GREEN" ]] || fail "unsupported --phase '$phase'; expected RED or GREEN"
@@ -582,7 +1030,36 @@ run_tdd() {
     resolve_context
     RUNTIME_MODE="tdd_run"
 
+    if ! resolve_tdd_lane_or_block "$phase" "$SITE" "$test_file" "$lane" "$parser_format" "$methods_csv"; then
+        return 3
+    fi
+
+    lane="$RESOLVED_TDD_LANE"
+    test_file="$RESOLVED_TDD_TEST_FILE"
+
     prepare_runtime
+
+    if [[ "$skip_preflight" != true && "${VIEW_LOCAL_SKIP_PREFLIGHT:-}" != "1" ]]; then
+        local preflight_output=""
+        set +e
+        preflight_output="$(run_container_tdd_preflight "$SITE" "$test_file" "$parser_format")"
+        local preflight_rc=$?
+        set -e
+        if [[ $preflight_rc -ne 0 ]]; then
+            emit_tdd_preflight_blocked \
+                "$phase" \
+                "$SITE" \
+                "$lane" \
+                "$RESOLVED_TDD_PROFILE" \
+                "$test_file" \
+                "$methods_csv" \
+                "$preflight_output" \
+                "$parser_format"
+            return 3
+        fi
+    fi
+
+    configure_phpunit_execution_for_profile "$RESOLVED_TDD_PROFILE" "$test_file"
     resolve_phpunit_entrypoint
     [[ -f "$DEFAULT_TDD_RESULT_PARSER" ]] || fail "TDD result parser not found: $DEFAULT_TDD_RESULT_PARSER"
 
@@ -594,21 +1071,21 @@ run_tdd() {
     stdout_file="$(mktemp /tmp/view-local-tdd-stdout.XXXXXX)"
     stderr_file="$(mktemp /tmp/view-local-tdd-stderr.XXXXXX)"
 
-    phpunit_args+=(--configuration "$APP_ROOT/vivid/phpunit.xml")
+    phpunit_args+=(--configuration "$PHPUNIT_EXEC_CONFIG")
     phpunit_args+=(--log-junit "$junit_file")
     if [[ -n "$filter_pattern" ]]; then
         phpunit_args+=(--filter "$filter_pattern")
     fi
-    phpunit_args+=("$test_file")
+    phpunit_args+=("$PHPUNIT_EXEC_TEST_PATH")
     if [[ ${#passthrough[@]} -gt 0 ]]; then
         phpunit_args+=("${passthrough[@]}")
     fi
 
-    command_used="$(join_command_for_display php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}")"
+    command_used="$(join_command_for_display php -d "auto_prepend_file=$PHPUNIT_EXEC_PREPEND" "$PHPUNIT" "${phpunit_args[@]}")"
 
-    cd "$APP_ROOT/vivid"
+    cd "$PHPUNIT_EXEC_WORKDIR"
     set +e
-    php -d "auto_prepend_file=$PHP_BOOTSTRAP" "$PHPUNIT" "${phpunit_args[@]}" >"$stdout_file" 2>"$stderr_file"
+    php -d "auto_prepend_file=$PHPUNIT_EXEC_PREPEND" "$PHPUNIT" "${phpunit_args[@]}" >"$stdout_file" 2>"$stderr_file"
     raw_status=$?
     set -e
 
@@ -621,6 +1098,7 @@ run_tdd() {
             --lane "$lane" \
             --test-file "$test_file" \
             --methods "$methods_csv" \
+            --resolved-profile "$RESOLVED_TDD_PROFILE" \
             --resolved-phpunit-path "$PHPUNIT" \
             --command-used "$command_used" \
             --raw-exit-code "$raw_status" \
@@ -651,6 +1129,14 @@ main() {
         diagnose)
             shift
             run_diagnose "$@"
+            ;;
+        inspect-contract)
+            shift
+            run_inspect_contract "$@"
+            ;;
+        preflight-tdd)
+            shift
+            run_preflight_tdd_command "$@"
             ;;
         run)
             shift
