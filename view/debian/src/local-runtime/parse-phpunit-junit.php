@@ -67,6 +67,20 @@ function tddMethodMatches(string $testcaseName, string $targetMethod): bool
         || str_starts_with($testcaseName, $targetMethod . ' with data set ');
 }
 
+function tddNormalizeFailureCategoryForOutput(string $category): string
+{
+  $category = strtolower(trim($category));
+
+  return match ($category) {
+      'assertion' => 'assertion',
+      'test_design', 'non_assertion' => 'test_design',
+      'environment_blocked', 'docker', 'site_config', 'phpunit_entrypoint', 'bootstrap', 'lane_resolution' => 'environment_blocked',
+      'runtime', 'test_discovery' => 'environment_blocked',
+      'none' => 'none',
+      default => 'test_design',
+  };
+}
+
 function tddClassifyFailureCategory(string $summary): string
 {
     $lower = strtolower($summary);
@@ -209,6 +223,7 @@ function tddParseOptions(array $argv): array
         'test-file',
         'methods',
         'resolved-phpunit-path',
+        'resolved-profile',
         'command-used',
         'raw-exit-code',
         'junit',
@@ -312,10 +327,14 @@ if ($testFile === '') {
     exit(tddFail('missing required --test-file'));
 }
 
+$resolvedProfile = (string) ($options['resolved-profile'] ?? $lane);
+
 $result = [
     'phase' => $phase,
     'site' => $site,
     'lane' => $lane,
+    'resolvedLane' => $lane,
+    'resolvedProfile' => $resolvedProfile,
     'testFile' => $testFile,
     'targetedMethods' => $methods,
     'resolvedPhpunitPath' => $resolvedPhpunitPath,
@@ -326,6 +345,8 @@ $result = [
     'failureCategory' => 'runtime',
     'assertionSummary' => 'none',
     'environmentSummary' => tddTrimmedSummary($stdout, $stderr),
+    'assertionEvidence' => 'none',
+    'nonAssertionEvidence' => tddTrimmedSummary($stdout, $stderr),
     'missingMethods' => [],
     'methodResults' => [],
     'next' => 'fix_environment',
@@ -370,6 +391,8 @@ if ($xml instanceof SimpleXMLElement) {
                 $result['verdict'] = 'valid_red';
                 $result['failureCategory'] = 'assertion';
                 $result['assertionSummary'] = "{$targetCount} targeted test(s) failed by assertion as expected";
+                $result['assertionEvidence'] = $result['assertionSummary'];
+                $result['nonAssertionEvidence'] = 'none';
                 $result['environmentSummary'] = 'none';
                 $result['next'] = 'implement';
             } else {
@@ -384,6 +407,8 @@ if ($xml instanceof SimpleXMLElement) {
                 $result['environmentSummary'] = $missingMethods !== []
                     ? 'Targeted methods missing from executed output'
                     : tddTrimmedSummary($stdout, $stderr);
+                $result['assertionEvidence'] = $result['assertionSummary'];
+                $result['nonAssertionEvidence'] = $result['environmentSummary'];
                 $result['next'] = 'fix_test_or_stub';
             }
         } else {
@@ -392,6 +417,8 @@ if ($xml instanceof SimpleXMLElement) {
                 $result['verdict'] = 'valid_green';
                 $result['failureCategory'] = 'none';
                 $result['assertionSummary'] = "{$targetCount} targeted test(s) passed";
+                $result['assertionEvidence'] = $result['assertionSummary'];
+                $result['nonAssertionEvidence'] = 'none';
                 $result['environmentSummary'] = 'none';
                 $result['next'] = 'complete';
             } else {
@@ -406,6 +433,8 @@ if ($xml instanceof SimpleXMLElement) {
                 $result['environmentSummary'] = $missingMethods !== []
                     ? 'Targeted methods missing from executed output'
                     : tddTrimmedSummary($stdout, $stderr);
+                $result['assertionEvidence'] = $result['assertionSummary'];
+                $result['nonAssertionEvidence'] = $result['environmentSummary'];
                 $result['next'] = 'review';
             }
         }
@@ -419,6 +448,19 @@ if ($result['resultType'] === 'environment_blocked' && $result['missingMethods']
 
 if ($result['resultType'] === 'environment_blocked') {
     $result['failureCategory'] = tddClassifyFailureCategory($result['environmentSummary']);
+    $result['assertionEvidence'] = 'none';
+    $result['nonAssertionEvidence'] = $result['environmentSummary'];
+    $summaryLower = strtolower($result['environmentSummary']);
+    if ($result['failureCategory'] === 'test_discovery'
+        && str_contains($summaryLower, 'cannot be found in')
+    ) {
+        $result['next'] = 'check_class_name_matches_file';
+    }
+}
+
+$result['failureCategory'] = tddNormalizeFailureCategoryForOutput((string) $result['failureCategory']);
+if ($result['targetedMethods'] !== []) {
+    $result['testMethods'] = $result['targetedMethods'];
 }
 
 if ($format === 'json') {
