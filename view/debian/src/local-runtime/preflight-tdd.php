@@ -58,9 +58,49 @@ function preflightCheck(bool $ok, string $key): array
     return ['key' => $key, 'ok' => $ok];
 }
 
+function preflightSingleLine(string $value): string
+{
+    return str_replace(["\r", "\n"], ' ', $value);
+}
+
+function preflightPhpBootstrapPath(): string
+{
+    $bootstrap = getenv('VIEW_PHP_BOOTSTRAP');
+    if ($bootstrap !== false && trim($bootstrap) !== '') {
+        return trim($bootstrap);
+    }
+
+    $bootstrap = getenv('VIEW_LOCAL_PHP_BOOTSTRAP');
+    if ($bootstrap !== false && trim($bootstrap) !== '') {
+        return trim($bootstrap);
+    }
+
+    $runtimeBootstrap = __DIR__ . '/php-cli-bootstrap.php';
+    if (is_file($runtimeBootstrap)) {
+        return $runtimeBootstrap;
+    }
+
+    return '/usr/local/lib/tke-local/php-cli-bootstrap.php';
+}
+
+function preflightSharpBootstrapPath(): string
+{
+    $bootstrap = getenv('VIEW_SHARP_PHP_BOOTSTRAP');
+    if ($bootstrap !== false && trim($bootstrap) !== '') {
+        return trim($bootstrap);
+    }
+
+    $runtimeBootstrap = __DIR__ . '/sharp-cli-bootstrap.php';
+    if (is_file($runtimeBootstrap)) {
+        return $runtimeBootstrap;
+    }
+
+    return '/usr/local/lib/tke-local/sharp-cli-bootstrap.php';
+}
+
 function preflightResolvePhpunitPath(string $appRoot, string $site, string $profile): array
 {
-    $bootstrap = getenv('VIEW_LOCAL_PHP_BOOTSTRAP') ?: '/usr/local/lib/tke-local/php-cli-bootstrap.php';
+    $bootstrap = preflightPhpBootstrapPath();
     $helper = rtrim($appRoot, '/') . '/vivid/tests/bootstrap.php';
 
     if (!is_file($helper)) {
@@ -130,18 +170,92 @@ function preflightSharpPhpunitConfig(string $testFile, string $autotestRoot): ar
         return ['ok' => false, 'path' => '', 'detail' => 'Cannot determine autotest suite from test file'];
     }
 
-    $config = rtrim($autotestRoot, '/') . '/phpunit/' . $suite . '/phpunit.xml';
+    $workdir = rtrim($autotestRoot, '/') . '/phpunit';
+    $config = $workdir . '/' . $suite . '/phpunit.xml';
     if (!is_file($config)) {
         return ['ok' => false, 'path' => $config, 'detail' => "phpunit.xml not found: {$config}"];
     }
 
-    return ['ok' => true, 'path' => $config, 'detail' => ''];
+    return [
+        'ok' => true,
+        'path' => $config,
+        'detail' => '',
+        'workdir' => $workdir,
+        'testPath' => $relative,
+    ];
+}
+
+function preflightExecutionContract(string $resolvedProfile, string $testFile, string $appRoot, array $sharpConfig): array
+{
+    if ($resolvedProfile === 'sharp-unit' || str_starts_with($testFile, 'autotest/phpunit/')) {
+        return [
+            'workdir' => (string) ($sharpConfig['workdir'] ?? ''),
+            'config' => (string) ($sharpConfig['path'] ?? ''),
+            'testPath' => (string) ($sharpConfig['testPath'] ?? ''),
+            'prepend' => preflightSharpBootstrapPath(),
+        ];
+    }
+
+    $normalized = str_replace('\\', '/', ltrim($testFile, './'));
+    if (str_starts_with($normalized, 'vivid/')) {
+        $normalized = substr($normalized, strlen('vivid/'));
+    }
+
+    return [
+        'workdir' => rtrim($appRoot, '/') . '/vivid',
+        'config' => rtrim($appRoot, '/') . '/vivid/phpunit.xml',
+        'testPath' => $normalized,
+        'prepend' => preflightPhpBootstrapPath(),
+    ];
+}
+
+function preflightOutput(array $payload, string $format): void
+{
+    if ($format === 'shell') {
+        $checksJson = json_encode($payload['checks'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
+        $blockersJson = json_encode($payload['blockers'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '[]';
+        $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
+
+        foreach ([
+            (string) ($payload['status'] ?? ''),
+            (string) ($payload['site'] ?? ''),
+            (string) ($payload['testFile'] ?? ''),
+            (string) ($payload['resolvedLane'] ?? ''),
+            (string) ($payload['resolvedProfile'] ?? ''),
+            (string) ($payload['resolvedPhpunitPath'] ?? ''),
+            (string) ($payload['phpunitExecWorkdir'] ?? ''),
+            (string) ($payload['phpunitExecConfig'] ?? ''),
+            (string) ($payload['phpunitExecTestPath'] ?? ''),
+            (string) ($payload['phpunitExecPrepend'] ?? ''),
+            (string) ($payload['hint'] ?? ''),
+            $blockersJson,
+            $checksJson,
+            $payloadJson,
+        ] as $value) {
+            echo preflightSingleLine($value) . PHP_EOL;
+        }
+
+        return;
+    }
+
+    if ($format === 'text') {
+        foreach ($payload as $key => $value) {
+            if (is_array($value)) {
+                $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '[]';
+            }
+            echo $key . ': ' . $value . PHP_EOL;
+        }
+
+        return;
+    }
+
+    echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
 }
 
 $options = preflightParseOptions($_SERVER['argv'] ?? []);
 $site = trim((string) $options['site']);
 $testFile = trim((string) $options['test-file']);
-$format = $options['format'] === 'text' ? 'text' : 'json';
+$format = in_array($options['format'], ['text', 'shell'], true) ? $options['format'] : 'json';
 
 $resolvedLane = trim((string) getenv('RESOLVED_LANE'));
 $resolvedProfile = trim((string) getenv('RESOLVED_PROFILE'));
@@ -160,6 +274,8 @@ if ($testFile === '') {
 
 $checks = [];
 $blockers = [];
+$resolvedPhpunitPath = '';
+$sharpConfig = ['ok' => false, 'path' => '', 'detail' => '', 'workdir' => '', 'testPath' => ''];
 
 if ($resolvedLane === '') {
     $checks['resolved_lane'] = preflightCheck(false, 'resolved_lane');
@@ -214,6 +330,17 @@ $needsAutotest = $resolvedProfile === 'sharp-unit'
     || str_starts_with($resolvedLane, 'sharp-')
     || str_starts_with($testFile, 'autotest/phpunit/');
 
+$phpunit = ['ok' => false, 'path' => '', 'detail' => 'PHPUnit resolution unavailable'];
+if ($site !== '' && $resolvedProfile !== '') {
+    $phpunit = preflightResolvePhpunitPath($appRoot, $site, $resolvedProfile);
+}
+$checks['phpunit_path'] = preflightCheck($phpunit['ok'], 'phpunit_path');
+if (!$phpunit['ok']) {
+    $blockers[] = 'phpunit_path';
+} else {
+    $resolvedPhpunitPath = (string) ($phpunit['path'] ?? '');
+}
+
 if ($needsAutotest) {
     $autotestOk = is_dir($autotestRoot . '/phpunit');
     $checks['autotest_mounted'] = preflightCheck($autotestOk, 'autotest_mounted');
@@ -226,12 +353,37 @@ if ($needsAutotest) {
             $blockers[] = 'phpunit_config';
         }
     }
-} else {
-    $phpunit = preflightResolvePhpunitPath($appRoot, $site, $resolvedProfile !== '' ? $resolvedProfile : 'vivid-unit');
-    $checks['phpunit_path'] = preflightCheck($phpunit['ok'], 'phpunit_path');
-    if (!$phpunit['ok']) {
-        $blockers[] = 'phpunit_path';
-    }
+}
+
+$execution = preflightExecutionContract(
+    $resolvedProfile !== '' ? $resolvedProfile : 'vivid-unit',
+    $testFile,
+    $appRoot,
+    $sharpConfig,
+);
+$executionWorkdir = (string) ($execution['workdir'] ?? '');
+$executionConfig = (string) ($execution['config'] ?? '');
+$executionTestPath = (string) ($execution['testPath'] ?? '');
+$executionPrepend = (string) ($execution['prepend'] ?? '');
+$executionTarget = $executionWorkdir !== '' && $executionTestPath !== ''
+    ? rtrim($executionWorkdir, '/') . '/' . ltrim($executionTestPath, '/')
+    : '';
+
+$checks['phpunit_exec_workdir'] = preflightCheck($executionWorkdir !== '' && is_dir($executionWorkdir), 'phpunit_exec_workdir');
+$checks['phpunit_exec_config'] = preflightCheck($executionConfig !== '' && is_file($executionConfig), 'phpunit_exec_config');
+$checks['phpunit_exec_test_path'] = preflightCheck($executionTarget !== '' && is_file($executionTarget), 'phpunit_exec_test_path');
+$checks['phpunit_exec_prepend'] = preflightCheck($executionPrepend !== '' && is_file($executionPrepend), 'phpunit_exec_prepend');
+if (!$checks['phpunit_exec_workdir']['ok']) {
+    $blockers[] = 'phpunit_exec_workdir';
+}
+if (!$checks['phpunit_exec_config']['ok']) {
+    $blockers[] = 'phpunit_exec_config';
+}
+if (!$checks['phpunit_exec_test_path']['ok']) {
+    $blockers[] = 'phpunit_exec_test_path';
+}
+if (!$checks['phpunit_exec_prepend']['ok']) {
+    $blockers[] = 'phpunit_exec_prepend';
 }
 
 $status = $blockers === [] ? 'ready' : 'blocked';
@@ -245,20 +397,15 @@ $payload = [
     'testFile' => $testFile,
     'resolvedLane' => $resolvedLane,
     'resolvedProfile' => $resolvedProfile,
+    'resolvedPhpunitPath' => $resolvedPhpunitPath,
+    'phpunitExecWorkdir' => $executionWorkdir,
+    'phpunitExecConfig' => $executionConfig,
+    'phpunitExecTestPath' => $executionTestPath,
+    'phpunitExecPrepend' => $executionPrepend,
     'checks' => $checks,
     'blockers' => array_values(array_unique($blockers)),
     'hint' => $hint,
 ];
 
-if ($format === 'text') {
-    foreach ($payload as $key => $value) {
-        if (is_array($value)) {
-            $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '[]';
-        }
-        echo $key . ': ' . $value . PHP_EOL;
-    }
-    exit($status === 'ready' ? 0 : 2);
-}
-
-echo json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+preflightOutput($payload, $format);
 exit($status === 'ready' ? 0 : 2);

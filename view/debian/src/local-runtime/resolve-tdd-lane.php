@@ -204,8 +204,23 @@ function laneProfileFor(array $contracts, array $entry): string
     return (string) ($contracts['defaultLane'] ?? 'vivid-unit');
 }
 
+function laneSingleLine(string $value): string
+{
+    return str_replace(["\r", "\n"], ' ', $value);
+}
+
 function laneOutput(array $payload, string $format): void
 {
+    if ($format === 'shell') {
+        echo laneSingleLine((string) ($payload['status'] ?? '')) . PHP_EOL;
+        echo laneSingleLine((string) ($payload['resolvedLane'] ?? '')) . PHP_EOL;
+        echo laneSingleLine((string) ($payload['resolvedProfile'] ?? '')) . PHP_EOL;
+        echo laneSingleLine((string) ($payload['message'] ?? '')) . PHP_EOL;
+        echo laneSingleLine((string) ($payload['testFile'] ?? '')) . PHP_EOL;
+
+        return;
+    }
+
     if ($format === 'text') {
         foreach ($payload as $key => $value) {
             if (is_array($value)) {
@@ -226,7 +241,7 @@ $contractsPath = $options['contracts'] !== ''
     : (rtrim((string) getenv('VIEW_APP_ROOT'), '/') . '/testing-contracts.json');
 $testFile = laneNormalizeTestFile((string) $options['test-file']);
 $requestedLane = trim((string) $options['lane']);
-$format = $options['format'] === 'text' ? 'text' : 'json';
+$format = in_array($options['format'], ['text', 'shell'], true) ? $options['format'] : 'json';
 
 if ($testFile === '') {
     exit(laneFail('missing required --test-file'));

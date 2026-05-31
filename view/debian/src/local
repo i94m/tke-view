@@ -226,6 +226,12 @@ init_context_defaults() {
     PARSE_skip_preflight=""
     PARSE_unit_target=""
     PARSE_filter_name=""
+    PREFLIGHT_RESOLVED_PHPUNIT_PATH=""
+    PREFLIGHT_EXEC_WORKDIR=""
+    PREFLIGHT_EXEC_CONFIG=""
+    PREFLIGHT_EXEC_TEST_PATH=""
+    PREFLIGHT_EXEC_PREPEND=""
+    PREFLIGHT_OUTPUT=""
 }
 
 parse_local_options() {
@@ -384,13 +390,22 @@ parse_local_options() {
 
     case "$command" in
         run|artisan)
-            REMAINING_ARGS=("${unparsed[@]}" "${passthrough[@]}")
+            REMAINING_ARGS=()
+            if [[ ${#unparsed[@]} -gt 0 ]]; then
+                REMAINING_ARGS+=("${unparsed[@]}")
+            fi
+            if [[ ${#passthrough[@]} -gt 0 ]]; then
+                REMAINING_ARGS+=("${passthrough[@]}")
+            fi
             ;;
         *)
             if [[ ${#unparsed[@]} -gt 0 ]]; then
                 fail "unknown option for $command: ${unparsed[0]}"
             fi
-            REMAINING_ARGS=("${passthrough[@]}")
+            REMAINING_ARGS=()
+            if [[ ${#passthrough[@]} -gt 0 ]]; then
+                REMAINING_ARGS+=("${passthrough[@]}")
+            fi
             ;;
     esac
 }
@@ -583,14 +598,169 @@ print_diagnose_json() {
 EOF
 }
 
+prepare_runtime_stat_mtime() {
+    local path="$1"
+
+    if stat -c %Y "$path" >/dev/null 2>&1; then
+        stat -c %Y "$path"
+        return 0
+    fi
+
+    if stat -f %m "$path" >/dev/null 2>&1; then
+        stat -f %m "$path"
+        return 0
+    fi
+
+    printf '0\n'
+}
+
+prepare_runtime_path_signature() {
+    local path="$1"
+    local size="0"
+
+    if [[ -L "$path" ]]; then
+        printf 'link|%s|%s|%s\n' "$path" "$(prepare_runtime_stat_mtime "$path")" "$(readlink "$path" 2>/dev/null || true)"
+        return 0
+    fi
+
+    if [[ -f "$path" ]]; then
+        size="$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')"
+        printf 'file|%s|%s|%s\n' "$path" "$(prepare_runtime_stat_mtime "$path")" "${size:-0}"
+        return 0
+    fi
+
+    if [[ -d "$path" ]]; then
+        printf 'dir|%s|%s\n' "$path" "$(prepare_runtime_stat_mtime "$path")"
+        return 0
+    fi
+
+    printf 'missing|%s\n' "$path"
+}
+
+prepare_runtime_cache_key() {
+    local autotest_root="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+
+    {
+        printf 'site=%s\n' "$SITE"
+        printf 'app_root=%s\n' "$APP_ROOT"
+        printf 'site_root=%s\n' "$SITE_ROOT"
+        printf 'runtime_dir=%s\n' "$DEFAULT_TKE_LOCAL_LIB"
+        printf 'tk_path=%s\n' "${VIEW_TK_PATH:-$DEFAULT_TK_ROOT}"
+        printf 'legacy_tk_root=%s\n' "${VIEW_LEGACY_TK_ROOT:-/opt/tkdev2}"
+        printf 'autotest_root=%s\n' "$autotest_root"
+        printf 'autotest_country=%s\n' "${VIEW_AUTOTEST_COUNTRY_NAME:-china}"
+        if [[ -d "$autotest_root/phpunit" ]]; then
+            printf 'autotest_mounted=1\n'
+        else
+            printf 'autotest_mounted=0\n'
+        fi
+    } | cksum | awk '{print $1 "-" $2}'
+}
+
+prepare_runtime_fingerprint() {
+    local autotest_root="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+
+    {
+        printf 'site=%s\n' "$SITE"
+        printf 'app_root=%s\n' "$APP_ROOT"
+        printf 'site_root=%s\n' "$SITE_ROOT"
+        printf 'runtime_dir=%s\n' "$DEFAULT_TKE_LOCAL_LIB"
+        printf 'tk_path=%s\n' "${VIEW_TK_PATH:-$DEFAULT_TK_ROOT}"
+        printf 'legacy_tk_root=%s\n' "${VIEW_LEGACY_TK_ROOT:-/opt/tkdev2}"
+        printf 'autotest_root=%s\n' "$autotest_root"
+        printf 'autotest_country=%s\n' "${VIEW_AUTOTEST_COUNTRY_NAME:-china}"
+        prepare_runtime_path_signature "$DEFAULT_TKE_LOCAL_LIB/prepare-local-runtime-assets.php"
+        prepare_runtime_path_signature "$DEFAULT_TKE_LOCAL_LIB/prepare-autotest-bridges.php"
+        prepare_runtime_path_signature "$DEFAULT_TKE_LOCAL_LIB/templates/ViewLoggerConfig.php"
+        prepare_runtime_path_signature "$DEFAULT_TKE_LOCAL_LIB/templates/log4php_config.xml"
+        prepare_runtime_path_signature "$SITE_ROOT/log4php_config.xml"
+        if [[ -d "$autotest_root/phpunit" ]]; then
+            printf 'autotest_mounted=1\n'
+            prepare_runtime_path_signature "$autotest_root/phpunit"
+        else
+            printf 'autotest_mounted=0\n'
+        fi
+    } | cksum | awk '{print $1 "-" $2}'
+}
+
+prepare_runtime_cache_file() {
+    local cache_dir="${VIEW_LOCAL_PREPARE_CACHE_DIR:-/tmp/view-local-prepare-cache}"
+
+    if ! mkdir -p "$cache_dir" 2>/dev/null; then
+        printf '\n'
+        return 0
+    fi
+
+    printf '%s/%s.stamp\n' "$cache_dir" "$(prepare_runtime_cache_key)"
+}
+
+prepare_runtime_symlink_matches() {
+    local link_path="$1"
+    local expected_target="$2"
+    local current_target=""
+
+    [[ -L "$link_path" ]] || return 1
+    current_target="$(readlink "$link_path" 2>/dev/null || true)"
+    [[ "$current_target" == "$expected_target" ]]
+}
+
+prepare_runtime_outputs_ready() {
+    local autotest_root="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+    local tk_path="${VIEW_TK_PATH:-$DEFAULT_TK_ROOT}"
+    local legacy_root="${VIEW_LEGACY_TK_ROOT:-/opt/tkdev2}"
+    local country="${VIEW_AUTOTEST_COUNTRY_NAME:-china}"
+
+    [[ -f "$APP_ROOT/ViewLoggerConfig.php" ]] || return 1
+    [[ -f "$APP_ROOT/log4php_config.xml" ]] || return 1
+
+    if [[ -d "$autotest_root/phpunit" ]]; then
+        prepare_runtime_symlink_matches "$legacy_root/$country/web" "$APP_ROOT/web" || return 1
+        prepare_runtime_symlink_matches "$tk_path/autotest" "$autotest_root" || return 1
+
+        if [[ -d "$APP_ROOT/web" ]]; then
+            prepare_runtime_symlink_matches "$tk_path/web" "$APP_ROOT/web" || return 1
+        fi
+        if [[ -d "$APP_ROOT/sys" ]]; then
+            prepare_runtime_symlink_matches "$tk_path/sys" "$APP_ROOT/sys" || return 1
+        fi
+        if [[ -d "$APP_ROOT/vivid" ]]; then
+            prepare_runtime_symlink_matches "$tk_path/vivid" "$APP_ROOT/vivid" || return 1
+        fi
+    fi
+
+    return 0
+}
+
 prepare_runtime() {
+    local autotest_root="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+    local cache_file=""
+    local current_fingerprint=""
+    local cached_fingerprint=""
+
     ensure_site_bridge
     export_runtime_env
+
+    if [[ "${VIEW_LOCAL_DISABLE_PREPARE_CACHE:-0}" != "1" ]]; then
+        cache_file="$(prepare_runtime_cache_file)"
+        current_fingerprint="$(prepare_runtime_fingerprint)"
+
+        if [[ -n "$cache_file" && -f "$cache_file" ]]; then
+            cached_fingerprint="$(cat "$cache_file" 2>/dev/null || true)"
+            if [[ "$cached_fingerprint" == "$current_fingerprint" ]] && prepare_runtime_outputs_ready; then
+                return 0
+            fi
+        fi
+    fi
+
     php "$DEFAULT_TKE_LOCAL_LIB/prepare-local-runtime-assets.php" >/dev/null \
         || fail "failed to prepare local runtime assets (ViewLoggerConfig / log4php)"
-    if [[ -d "${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}/phpunit" ]]; then
+    if [[ -d "$autotest_root/phpunit" ]]; then
         php "$DEFAULT_TKE_LOCAL_LIB/prepare-autotest-bridges.php" >/dev/null \
             || fail "failed to prepare autotest legacy path bridges"
+    fi
+
+    if [[ -n "$cache_file" && -n "$current_fingerprint" ]]; then
+        printf '%s\n' "$current_fingerprint" > "$cache_file"
     fi
 }
 
@@ -602,6 +772,36 @@ resolve_phpunit_entrypoint() {
     [[ -f "$resolved_path" ]] || fail "PHPUnit entrypoint not found: $resolved_path"
 
     PHPUNIT="$resolved_path"
+}
+
+reuse_preflight_phpunit_entrypoint_or_resolve() {
+    if [[ -n "$PREFLIGHT_RESOLVED_PHPUNIT_PATH" ]]; then
+        [[ -f "$PREFLIGHT_RESOLVED_PHPUNIT_PATH" ]] \
+            || fail "PHPUnit entrypoint from preflight not found: $PREFLIGHT_RESOLVED_PHPUNIT_PATH"
+        PHPUNIT="$PREFLIGHT_RESOLVED_PHPUNIT_PATH"
+        return 0
+    fi
+
+    resolve_phpunit_entrypoint
+}
+
+reuse_preflight_execution_contract_or_configure() {
+    local profile="$1"
+    local test_file="$2"
+
+    if [[ -n "$PREFLIGHT_EXEC_WORKDIR" && -n "$PREFLIGHT_EXEC_CONFIG" && -n "$PREFLIGHT_EXEC_TEST_PATH" && -n "$PREFLIGHT_EXEC_PREPEND" ]]; then
+        [[ -d "$PREFLIGHT_EXEC_WORKDIR" ]] || fail "PHPUnit workdir from preflight not found: $PREFLIGHT_EXEC_WORKDIR"
+        [[ -f "$PREFLIGHT_EXEC_CONFIG" ]] || fail "PHPUnit config from preflight not found: $PREFLIGHT_EXEC_CONFIG"
+        [[ -f "$PREFLIGHT_EXEC_PREPEND" ]] || fail "PHP bootstrap from preflight not found: $PREFLIGHT_EXEC_PREPEND"
+
+        PHPUNIT_EXEC_WORKDIR="$PREFLIGHT_EXEC_WORKDIR"
+        PHPUNIT_EXEC_CONFIG="$PREFLIGHT_EXEC_CONFIG"
+        PHPUNIT_EXEC_TEST_PATH="$PREFLIGHT_EXEC_TEST_PATH"
+        PHPUNIT_EXEC_PREPEND="$PREFLIGHT_EXEC_PREPEND"
+        return 0
+    fi
+
+    configure_phpunit_execution_for_profile "$profile" "$test_file"
 }
 
 run_diagnose() {
@@ -741,7 +941,8 @@ resolve_tdd_lane_or_block() {
     local requested_lane="$4"
     local output_format="$5"
     local methods_csv="${6:-}"
-    local resolve_json=""
+    local resolve_output=""
+    local resolve_lines=()
     local resolve_status=0
     local resolve_status_field=""
     local resolved_lane=""
@@ -754,19 +955,25 @@ resolve_tdd_lane_or_block() {
     [[ -f "$APP_ROOT/testing-contracts.json" ]] || fail "testing contracts not found: $APP_ROOT/testing-contracts.json"
 
     set +e
-    resolve_json="$(php "$lane_resolver" \
+    resolve_output="$(php "$lane_resolver" \
         --contracts "$APP_ROOT/testing-contracts.json" \
         --test-file "$test_file" \
         --lane "$requested_lane" \
-        --format json 2>&1)"
+        --format shell 2>&1)"
     resolve_status=$?
     set -e
 
-    resolve_status_field="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["status"]??""):"";')"
-    resolved_lane="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["resolvedLane"]??""):"";')"
-    resolved_profile="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["resolvedProfile"]??""):"";')"
-    resolve_message="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["message"]??""):"";')"
-    normalized_test_file="$(RESOLVE_JSON="$resolve_json" php -r '$d=json_decode(getenv("RESOLVE_JSON"), true); echo is_array($d)?($d["testFile"]??""):"";')"
+    while IFS= read -r line; do
+        resolve_lines+=("$line")
+    done <<EOF
+$resolve_output
+EOF
+
+    resolve_status_field="${resolve_lines[0]:-}"
+    resolved_lane="${resolve_lines[1]:-}"
+    resolved_profile="${resolve_lines[2]:-}"
+    resolve_message="${resolve_lines[3]:-}"
+    normalized_test_file="${resolve_lines[4]:-}"
 
     if [[ $resolve_status -ne 0 || "$resolve_status_field" != "ok" ]]; then
         emit_tdd_lane_blocked \
@@ -775,7 +982,7 @@ resolve_tdd_lane_or_block() {
             "${resolved_lane:-unknown}" \
             "${normalized_test_file:-$test_file}" \
             "${resolved_profile:-unknown}" \
-            "${resolve_message:-$resolve_json}" \
+            "${resolve_message:-$resolve_output}" \
             "$output_format" \
             "$methods_csv"
         return 3
@@ -785,6 +992,19 @@ resolve_tdd_lane_or_block() {
     RESOLVED_TDD_PROFILE="$resolved_profile"
     RESOLVED_TDD_TEST_FILE="$normalized_test_file"
     return 0
+}
+
+export_tdd_preflight_env() {
+    local site="$1"
+    local test_file="$2"
+
+    export RESOLVED_LANE="$RESOLVED_TDD_LANE"
+    export RESOLVED_PROFILE="$RESOLVED_TDD_PROFILE"
+    export RESOLVED_TEST_FILE="$test_file"
+    export VIEW_SITE="$site"
+    export VIEW_APP_ROOT="$APP_ROOT"
+    export VIEW_SITE_ROOT_BASE="$SITE_ROOT_BASE"
+    export VIEW_AUTOTEST_ROOT="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
 }
 
 emit_tdd_preflight_blocked() {
@@ -852,30 +1072,40 @@ EOF
 run_container_tdd_preflight() {
     local site="$1"
     local test_file="$2"
-    local format="$3"
     local preflight_script=""
-    local preflight_json=""
+    local preflight_output=""
+    local preflight_lines=()
     local preflight_status=""
     local status_field=""
 
-    preflight_script="$(resolve_runtime_script_path preflight-tdd.php)"
+    PREFLIGHT_RESOLVED_PHPUNIT_PATH=""
+    PREFLIGHT_EXEC_WORKDIR=""
+    PREFLIGHT_EXEC_CONFIG=""
+    PREFLIGHT_EXEC_TEST_PATH=""
+    PREFLIGHT_EXEC_PREPEND=""
+    PREFLIGHT_OUTPUT=""
 
-    export RESOLVED_LANE="$RESOLVED_TDD_LANE"
-    export RESOLVED_PROFILE="$RESOLVED_TDD_PROFILE"
-    export RESOLVED_TEST_FILE="$test_file"
-    export VIEW_SITE="$site"
-    export VIEW_APP_ROOT="$APP_ROOT"
-    export VIEW_SITE_ROOT_BASE="$SITE_ROOT_BASE"
-    export VIEW_AUTOTEST_ROOT="${VIEW_AUTOTEST_ROOT:-$DEFAULT_AUTOTEST_ROOT}"
+    preflight_script="$(resolve_runtime_script_path preflight-tdd.php)"
+    export_tdd_preflight_env "$site" "$test_file"
 
     set +e
-    preflight_json="$(php "$preflight_script" --site "$site" --test-file "$test_file" --format json 2>&1)"
+    preflight_output="$(php "$preflight_script" --site "$site" --test-file "$test_file" --format shell 2>&1)"
     preflight_status=$?
     set -e
 
-    status_field="$(PREFLIGHT_JSON="$preflight_json" php -r '$d=json_decode(getenv("PREFLIGHT_JSON"), true); echo is_array($d)?($d["status"]??""):"";')"
+    while IFS= read -r line; do
+        preflight_lines+=("$line")
+    done <<EOF
+$preflight_output
+EOF
 
-    printf '%s\n' "$preflight_json"
+    status_field="${preflight_lines[0]:-}"
+    PREFLIGHT_RESOLVED_PHPUNIT_PATH="${preflight_lines[5]:-}"
+    PREFLIGHT_EXEC_WORKDIR="${preflight_lines[6]:-}"
+    PREFLIGHT_EXEC_CONFIG="${preflight_lines[7]:-}"
+    PREFLIGHT_EXEC_TEST_PATH="${preflight_lines[8]:-}"
+    PREFLIGHT_EXEC_PREPEND="${preflight_lines[9]:-}"
+    PREFLIGHT_OUTPUT="${preflight_lines[13]:-$preflight_output}"
 
     if [[ $preflight_status -ne 0 || "$status_field" != "ready" ]]; then
         return 2
@@ -888,6 +1118,9 @@ run_preflight_tdd_command() {
     local test_file=""
     local lane=""
     local methods_csv=""
+    local preflight_script=""
+    local preflight_output=""
+    local preflight_rc=0
 
     parse_local_options "preflight-tdd" "$@"
     test_file="$PARSE_test_file"
@@ -905,7 +1138,16 @@ run_preflight_tdd_command() {
     test_file="$RESOLVED_TDD_TEST_FILE"
     prepare_runtime
 
-    if ! run_container_tdd_preflight "$SITE" "$test_file" "$OUTPUT_FORMAT"; then
+    preflight_script="$(resolve_runtime_script_path preflight-tdd.php)"
+    export_tdd_preflight_env "$SITE" "$test_file"
+
+    set +e
+    preflight_output="$(php "$preflight_script" --site "$SITE" --test-file "$test_file" --format "$OUTPUT_FORMAT" 2>&1)"
+    preflight_rc=$?
+    set -e
+
+    printf '%s\n' "$preflight_output"
+    if [[ $preflight_rc -ne 0 ]]; then
         exit 3
     fi
 }
@@ -936,7 +1178,9 @@ run_test() {
     parse_local_options "test" "$@"
     unit_target="$PARSE_unit_target"
     filter_name="$PARSE_filter_name"
-    passthrough=("${REMAINING_ARGS[@]}")
+    if [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; then
+        passthrough=("${REMAINING_ARGS[@]}")
+    fi
 
     resolve_context
     RUNTIME_MODE="test"
@@ -1008,6 +1252,12 @@ run_tdd() {
     local parser_output=""
     local parser_format="$DEFAULT_TDD_OUTPUT_FORMAT"
 
+    PREFLIGHT_RESOLVED_PHPUNIT_PATH=""
+    PREFLIGHT_EXEC_WORKDIR=""
+    PREFLIGHT_EXEC_CONFIG=""
+    PREFLIGHT_EXEC_TEST_PATH=""
+    PREFLIGHT_EXEC_PREPEND=""
+
     parse_local_options "tdd-run" "$@"
     phase="$PARSE_phase"
     test_file="$PARSE_test_file"
@@ -1020,7 +1270,9 @@ run_tdd() {
     if [[ -n "$PARSE_parser_json" ]]; then
         parser_format="$PARSE_parser_json"
     fi
-    passthrough=("${REMAINING_ARGS[@]}")
+    if [[ ${#REMAINING_ARGS[@]} -gt 0 ]]; then
+        passthrough=("${REMAINING_ARGS[@]}")
+    fi
 
     phase="$(printf '%s' "$phase" | tr '[:lower:]' '[:upper:]')"
     [[ "$phase" == "RED" || "$phase" == "GREEN" ]] || fail "unsupported --phase '$phase'; expected RED or GREEN"
@@ -1040,9 +1292,8 @@ run_tdd() {
     prepare_runtime
 
     if [[ "$skip_preflight" != true && "${VIEW_LOCAL_SKIP_PREFLIGHT:-}" != "1" ]]; then
-        local preflight_output=""
         set +e
-        preflight_output="$(run_container_tdd_preflight "$SITE" "$test_file" "$parser_format")"
+        run_container_tdd_preflight "$SITE" "$test_file"
         local preflight_rc=$?
         set -e
         if [[ $preflight_rc -ne 0 ]]; then
@@ -1053,14 +1304,14 @@ run_tdd() {
                 "$RESOLVED_TDD_PROFILE" \
                 "$test_file" \
                 "$methods_csv" \
-                "$preflight_output" \
+                "$PREFLIGHT_OUTPUT" \
                 "$parser_format"
             return 3
         fi
     fi
 
-    configure_phpunit_execution_for_profile "$RESOLVED_TDD_PROFILE" "$test_file"
-    resolve_phpunit_entrypoint
+    reuse_preflight_execution_contract_or_configure "$RESOLVED_TDD_PROFILE" "$test_file"
+    reuse_preflight_phpunit_entrypoint_or_resolve
     [[ -f "$DEFAULT_TDD_RESULT_PARSER" ]] || fail "TDD result parser not found: $DEFAULT_TDD_RESULT_PARSER"
 
     if [[ -n "$methods_csv" ]]; then
