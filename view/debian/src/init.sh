@@ -5,6 +5,9 @@ if [ ! "$1" ]; then
     exit 1;
 fi
 
+cp /opt/local/log4php_config.xml /opt/tk/log4php_config.xml
+cp /opt/local/redisconfig /opt/tk/redisconfig
+
 corePath=/opt/tk/core
 user8ID=${1}
 

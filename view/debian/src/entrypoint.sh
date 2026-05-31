@@ -37,6 +37,9 @@ echo "Starting memcached, php-fpm, and apache2"
 memcached -u memcache -m 64 -p 11211 -l 127.0.0.1 &
 memcached_pid=$!
 
+# 启动 redis
+/etc/init.d/redis-server start
+
 "${PHP_FPM_BIN}" -F &
 php_fpm_pid=$!
 

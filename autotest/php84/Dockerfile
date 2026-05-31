@@ -1,12 +1,11 @@
 FROM debian:13-slim
 
-LABEL author="rt.wadewang"
 LABEL description="View autotesting environment."
 
 WORKDIR /opt/autotest
 
 # PHP版本
-ARG PHP_VERSION="8.2"
+ARG PHP_VERSION="8.4"
 # 声明构建参数
 ARG TARGETARCH
 
@@ -60,19 +59,10 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
 COPY src/php.ini /etc/php/${PHP_VERSION}/cli/php.ini
 COPY src/xdebug.ini /etc/php/${PHP_VERSION}/mods-available/xdebug.ini
 
-# ---------- behat ----------
-COPY src/behat-3.29.0.phar /usr/bin/behat
-
-# ---------- phpunit ----------
-COPY src/phpunit-11.5.46.phar /usr/bin/phpunit
-
 # ---------- init ----------
 COPY src/entrypoint.sh /run/entrypoint.sh
-COPY src/init.sh /run/init.sh
-RUN chmod +x /usr/bin/behat && \
-    chmod +x /usr/bin/phpunit && \
-    sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/entrypoint.sh && \
-    chmod +x /run/entrypoint.sh /run/init.sh && \
+RUN sed -i "s/{VERSION}/${PHP_VERSION}/g" /run/entrypoint.sh && \
+    chmod +x /run/entrypoint.sh \
     touch /var/log/error.log
 
 CMD ["/run/entrypoint.sh"]

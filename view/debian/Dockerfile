@@ -25,6 +25,7 @@ RUN useradd -m -d /opt/tk -s /bin/bash -c "TK User" tk && \
         tzdata \
         apache2 \
         memcached \
+        redis-server \
         lsb-release \
         apt-transport-https && \
     update-ca-certificates && \
@@ -94,6 +95,10 @@ COPY src/httpd.conf /etc/apache2/apache2.conf
 COPY src/sites /etc/apache2/sites-enabled/
 COPY src/local /usr/local/bin/view-local
 COPY src/local-runtime/ /usr/local/lib/tke-local/
+
+# 配置项目
+COPY src/log4php_config.xml /opt/local/log4php_config.xml
+COPY src/redisconfig /opt/local/redisconfig
 
 # ---------- init ----------
 COPY src/entrypoint.sh /run/entrypoint.sh
